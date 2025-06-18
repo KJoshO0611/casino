@@ -88,6 +88,7 @@ class Hand:
     bet: int = 0
     is_bust: bool = False
     is_blackjack: bool = False
+    is_natural_blackjack: bool = False
     has_doubled: bool = False
     is_finished: bool = False
     
@@ -1020,17 +1021,46 @@ async def start_game(ctx, table_id: str = None):
     table.state = GameState.PLAYING
     table.current_player_index = 0
     
-    # Deal initial cards
+    # Deal initial cards and check for natural blackjacks
     for _ in range(2):
         for player in table.players:
             player.hands[0].cards.append(table.deck.deal())
+            # Check for natural blackjack after each card is dealt
+            if len(player.hands[0].cards) == 2:
+                hand_value = player.hands[0].hand_value()
+                if hand_value == 21:
+                    player.hands[0].is_natural_blackjack = True
+                    player.hands[0].is_blackjack = True
+                    player.hands[0].is_finished = True
         table.dealer_cards.append(table.deck.deal())
     
-    # Check for blackjacks
-    for player in table.players:
-        if player.hands[0].hand_value() == 21:
-            player.hands[0].is_blackjack = True
-            player.hands[0].is_finished = True
+    # Check if dealer has natural blackjack
+    dealer_value = sum([10 if card.rank in ['J', 'Q', 'K'] else 11 if card.rank == 'A' else int(card.rank) 
+                       for card in table.dealer_cards[:2]])
+    if dealer_value == 21:
+        # Dealer has natural blackjack, end the game
+        table.state = GameState.FINISHED
+        await ctx.send("Dealer has natural blackjack! All players lose.")
+        await end_game(table)
+        return
+    
+    # Skip players with natural blackjacks
+    current_player = table.get_current_player()
+    while current_player:
+        if not current_player.current_hand.is_natural_blackjack:
+            break
+        table.next_player()
+        current_player = table.get_current_player()
+        
+        # If we've gone through all players and they all have natural blackjacks
+        if table.current_player_index == 0:
+            await ctx.send("All players have natural blackjacks! Moving to dealer's turn.")
+            break
+    
+    # If no one has natural blackjack, start the game
+    if not current_player:
+        table.current_player_index = 0
+        current_player = table.get_current_player()
     
     # Move to game channel
     game_channel = bot.get_channel(table.game_channel_id)
@@ -1045,12 +1075,12 @@ async def start_game(ctx, table_id: str = None):
         except:
             pass
     
-    # Create dealer embed
+    # Create dealer embed with buttons
     dealer_embed = create_dealer_embed(table)
     view = BlackjackView(table)
     table.dealer_embed_message = await game_channel.send(embed=dealer_embed, view=view)
     
-    # Create player embeds
+    # Create player embeds without buttons
     for player in table.players:
         player_embed = create_player_embed(player, table)
         message = await game_channel.send(embed=player_embed)
