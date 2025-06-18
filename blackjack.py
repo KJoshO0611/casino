@@ -46,6 +46,7 @@ class Card:
     def __init__(self, rank: str, suit: Suit):
         self.rank = rank
         self.suit = suit
+        self.is_ace = rank == 'A'
     
     def value(self) -> int:
         if self.rank in ['J', 'Q', 'K']:
@@ -91,12 +92,28 @@ class Hand:
     is_finished: bool = False
     
     def hand_value(self) -> int:
-        value = sum(card.value() for card in self.cards)
-        aces = sum(1 for card in self.cards if card.rank == 'A')
+        value = 0
+        ace_count = 0
         
-        while value > 21 and aces > 0:
-            value -= 10
-            aces -= 1
+        for card in self.cards:
+            if card.rank in ['J', 'Q', 'K']:
+                value += 10
+            elif card.rank == 'A':
+                ace_count += 1
+            else:
+                value += int(card.rank)
+        
+        # Add ace values
+        for _ in range(ace_count):
+            if value + 11 <= 21:
+                value += 11
+            else:
+                value += 1
+        
+        # Check for natural blackjack
+        if len(self.cards) == 2 and value == 21:
+            self.is_blackjack = True
+            self.is_finished = True
         
         return value
     
@@ -180,12 +197,23 @@ class BlackjackTable:
             self.current_player_index += 1
     
     def dealer_hand_value(self) -> int:
-        value = sum(card.value() for card in self.dealer_cards)
-        aces = sum(1 for card in self.dealer_cards if card.rank == 'A')
+        value = 0
+        ace_count = 0
         
-        while value > 21 and aces > 0:
-            value -= 10
-            aces -= 1
+        for card in self.dealer_cards:
+            if card.rank in ['J', 'Q', 'K']:
+                value += 10
+            elif card.rank == 'A':
+                ace_count += 1
+            else:
+                value += int(card.rank)
+        
+        # Add ace values
+        for _ in range(ace_count):
+            if value + 11 <= 21:
+                value += 11
+            else:
+                value += 1
         
         return value
     
@@ -357,23 +385,23 @@ class BettingView(discord.ui.View):
         super().__init__(timeout=120)
         self.table = table
     
-    @discord.ui.button(label="Bet 10", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Bet 10", style=discord.ButtonStyle.primary, custom_id="bet_10")
     async def bet_10(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.place_bet(interaction, 10)
     
-    @discord.ui.button(label="Bet 25", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Bet 25", style=discord.ButtonStyle.primary, custom_id="bet_25")
     async def bet_25(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.place_bet(interaction, 25)
     
-    @discord.ui.button(label="Bet 50", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Bet 50", style=discord.ButtonStyle.primary, custom_id="bet_50")
     async def bet_50(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.place_bet(interaction, 50)
     
-    @discord.ui.button(label="Bet 100", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Bet 100", style=discord.ButtonStyle.primary, custom_id="bet_100")
     async def bet_100(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.place_bet(interaction, 100)
     
-    @discord.ui.button(label="All In", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="All In", style=discord.ButtonStyle.danger, custom_id="bet_all_in")
     async def all_in(self, interaction: discord.Interaction, button: discord.ui.Button):
         player = next((p for p in self.table.players if p.user.id == interaction.user.id), None)
         if player:
@@ -421,23 +449,23 @@ class BlackjackView(discord.ui.View):
         super().__init__(timeout=300)
         self.table = table
     
-    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🃏")
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, custom_id="action_hit", emoji="🃏")
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_action(interaction, "hit")
     
-    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, emoji="✋")
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, custom_id="action_stand", emoji="✋")
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_action(interaction, "stand")
     
-    @discord.ui.button(label="Double", style=discord.ButtonStyle.success, emoji="📈")
+    @discord.ui.button(label="Double", style=discord.ButtonStyle.success, custom_id="action_double", emoji="📈")
     async def double(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_action(interaction, "double")
     
-    @discord.ui.button(label="Split", style=discord.ButtonStyle.primary, emoji="✂️")
+    @discord.ui.button(label="Split", style=discord.ButtonStyle.primary, custom_id="action_split", emoji="✂️")
     async def split(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_action(interaction, "split")
     
-    @discord.ui.button(label="Leave", style=discord.ButtonStyle.danger, emoji="🚪")
+    @discord.ui.button(label="Leave", style=discord.ButtonStyle.danger, custom_id="action_leave", emoji="🚪")
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_action(interaction, "leave")
     
@@ -471,6 +499,15 @@ class BlackjackView(discord.ui.View):
         card = self.table.deck.deal()
         hand.cards.append(card)
         
+        # Check for natural blackjack after first hit
+        if len(hand.cards) == 2 and hand.hand_value() == 21:
+            hand.is_blackjack = True
+            hand.is_finished = True
+            self.table.next_player()
+            await self.update_game_display(interaction)
+            await self.check_game_end()
+            return
+        
         if hand.hand_value() > 21:
             hand.is_bust = True
             hand.is_finished = True
@@ -479,9 +516,12 @@ class BlackjackView(discord.ui.View):
         
         if hand.is_finished:
             self.table.next_player()
+            await self.update_game_display(interaction)
+            await self.check_game_end()
+            return
         
+        # Update display without checking game end if not finished
         await self.update_game_display(interaction)
-        await self.check_game_end()
     
     async def handle_stand(self, interaction: discord.Interaction, player: Player, hand: Hand):
         hand.is_finished = True
@@ -611,8 +651,12 @@ class BlackjackView(discord.ui.View):
                 except:
                     pass
         
+        # Only defer if the interaction hasn't been responded to yet
         if not interaction.response.is_done():
-            await interaction.response.defer()
+            try:
+                await interaction.response.defer()
+            except (discord.errors.NotFound, discord.errors.HTTPException):
+                pass
     
     async def check_game_end(self):
         # Check if all players are done with all hands
@@ -936,59 +980,6 @@ async def start_betting(ctx, table_id: str = None):
     
     await ctx.send(f"Betting phase started in {game_channel.mention}!")
     await game_channel.send("🎰 **Place your bets!** Use the buttons below or type `!bet <amount>`")
-
-@bot.command(name='bet')
-async def place_bet_command(ctx, amount: int):
-    """Place a bet using command"""
-    # Find table for this user
-    user_table = None
-    for table in tables.values():
-        if table.game_channel_id == ctx.channel.id:
-            if any(p.user.id == ctx.author.id for p in table.players):
-                user_table = table
-                break
-    
-    if not user_table:
-        await ctx.send("You're not in a game in this channel!")
-        return
-    
-    if user_table.state != GameState.BETTING:
-        await ctx.send("Betting phase is not active!")
-        return
-    
-    player = next((p for p in user_table.players if p.user.id == ctx.author.id), None)
-    if not player:
-        await ctx.send("You're not in this game!")
-        return
-    
-    if player.has_bet:
-        await ctx.send("You've already placed a bet!")
-        return
-    
-    if amount <= 0:
-        await ctx.send("Bet must be a positive number!")
-        return
-    
-    if not player.can_afford_bet(amount):
-        tokens = get_user_tokens(player.user.id)
-        await ctx.send(f"Not enough tokens! You have {tokens}, need {amount}.")
-        return
-    
-    # Place the bet
-    player.hands[0].bet = amount
-    player.has_bet = True
-    remove_user_tokens(player.user.id, amount)
-    
-    # Update betting embed
-    if user_table.betting_embed_message:
-        betting_embed = create_betting_embed(user_table)
-        betting_view = BettingView(user_table)
-        try:
-            await user_table.betting_embed_message.edit(embed=betting_embed, view=betting_view)
-        except:
-            pass
-    
-    await ctx.send(f"✅ Bet placed: {amount} tokens!")
 
 @bot.command(name='start_game')
 @commands.has_permissions(administrator=True)
