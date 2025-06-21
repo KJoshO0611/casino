@@ -1,16 +1,14 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import asyncio
 import random
-from enum import Enum
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-import json
-import os
-from datetime import datetime
-import dotenv
-
-dotenv.load_dotenv()
+from collections import Counter
+from dataclasses import dataclass, field
+from enum import Enum
+import math
+from token_manager import TokenManager
 
 # Poker game classes and enums
 class Suit(Enum):
@@ -95,6 +93,12 @@ class HandEvaluator:
         rank_counts = {}
         for rank in ranks:
             rank_counts[rank] = rank_counts.get(rank, 0) + 1
+
+class Poker(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.tables: Dict[int, PokerTable] = {}
+        self.token_manager = TokenManager()
         
         # Check for flush
         suit_counts = {}
@@ -520,6 +524,8 @@ class PokerTable:
             winnings_per_player = self.pot // len(winners)
             for winner, _, _, _ in winners:
                 winner.chips += winnings_per_player
+                user_tokens[str(winner.user_id)] = winner.chips
+                save_user_tokens(user_tokens)
             
             self.pot = 0
         
@@ -529,43 +535,7 @@ class PokerTable:
         # Move dealer button
         self.dealer_position = (self.dealer_position + 1) % len(self.players)
 
-# Database management
-class ChipDatabase:
-    def __init__(self, filename="chips.json"):
-        self.filename = filename
-        self.data = self.load_data()
-    
-    def load_data(self):
-        if os.path.exists(self.filename):
-            with open(self.filename, 'r') as f:
-                return json.load(f)
-        return {"players": {}, "tips": {}}
-    
-    def save_data(self):
-        with open(self.filename, 'w') as f:
-            json.dump(self.data, f, indent=2)
-    
-    def get_player_chips(self, user_id: int) -> int:
-        return self.data["players"].get(str(user_id), 1000)
-    
-    def set_player_chips(self, user_id: int, chips: int):
-        self.data["players"][str(user_id)] = chips
-        self.save_data()
-    
-    def add_tip(self, user_id: int, amount: int):
-        user_str = str(user_id)
-        if user_str not in self.data["tips"]:
-            self.data["tips"][user_str] = 0
-        self.data["tips"][user_str] += amount
-        self.save_data()
-    
-    def get_tips(self, user_id: int) -> int:
-        return self.data["tips"].get(str(user_id), 0)
-
 # Discord Bot with Views for buttons
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
 intents.guild_messages = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -580,15 +550,14 @@ class PokerLobbyView(discord.ui.View):
         user_id = interaction.user.id
         username = interaction.user.display_name
         
-        chips = chip_db.get_player_chips(user_id)
+        chips = user_tokens.get(str(user_id), 1000)
         
         if self.table.add_player(user_id, username, chips):
-            await interaction.response.defer()
+            await interaction.response.send_message(f"🎲 {username} joined the table with {chips} chips!", ephemeral=True)
             await self.update_lobby_message(interaction)
         else:
-            await interaction.response.defer()
-            await self.update_lobby_message(interaction)
-    
+            await interaction.response.send_message("❌ Could not join table (table full or already joined)", ephemeral=True)
+
     @discord.ui.button(label='Leave Table', style=discord.ButtonStyle.red, emoji='👋')
     async def leave_table(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
@@ -1104,23 +1073,5 @@ async def start_game(ctx):
     else:
         await ctx.send("❌ Game is already in progress!")
 
-@bot.command(name='addchips')
-@commands.has_permissions(manage_guild=True)
-async def add_chips(ctx, amount: int, user: discord.Member = None):
-    """Add chips to a player's balance. If no user is specified, adds to the command author."""
-    if user is None:
-        user = ctx.author
-    
-    # Get current chips
-    current_chips = chip_db.get_player_chips(user.id)
-    
-    # Add chips
-    new_chips = current_chips + amount
-    chip_db.set_player_chips(user.id, new_chips)
-    
-    await ctx.send(f"💰 Added {amount} chips to {user.display_name}'s balance!\nNew balance: {new_chips} chips")
-
-# Run the bot
-if __name__ == "__main__":
-    # Replace 'YOUR_BOT_TOKEN' with your actual bot token
-    bot.run(os.getenv('TOKEN'))
+async def setup(bot):
+    await bot.add_cog(Poker(bot))

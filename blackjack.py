@@ -1,42 +1,22 @@
-# main.py
 import discord
 from discord.ext import commands
 import asyncio
-import json
-import os
 from typing import Dict, List, Optional
 import random
 from dataclasses import dataclass, field
 from enum import Enum
-import dotenv
+from token_manager import TokenManager
 
-dotenv.load_dotenv()
+class Blackjack(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.tables: Dict[str, BlackjackTable] = {}
+        self.token_manager = TokenManager()
 
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# Token storage - In production, use a database
-USER_TOKENS_FILE = "user_tokens.json"
-
-def load_user_tokens():
-    """Load user tokens from file"""
-    if os.path.exists(USER_TOKENS_FILE):
-        with open(USER_TOKENS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_user_tokens(tokens_data):
-    """Save user tokens to file"""
-    with open(USER_TOKENS_FILE, 'w') as f:
-        json.dump(tokens_data, f, indent=2)
-
-# Global token storage
-user_tokens = load_user_tokens()
+class Blackjack(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.tables: Dict[str, BlackjackTable] = {}
 
 # Card and Game Classes
 class Suit(Enum):
@@ -773,123 +753,6 @@ class JoinTableView(discord.ui.View):
         
         await interaction.response.send_message(f"Joined table {self.table_id}! Go to the game channel to play.", ephemeral=True)
 
-# Token management commands
-@bot.command(name='grant_tokens')
-@commands.has_permissions(administrator=True)
-async def grant_tokens(ctx, user: discord.Member, amount: int):
-    """Grant tokens to a player (Admin only)"""
-    if amount <= 0:
-        await ctx.send("Amount must be positive!")
-        return
-    
-    add_user_tokens(user.id, amount)
-    current_tokens = get_user_tokens(user.id)
-    
-    embed = discord.Embed(
-        title="💰 Tokens Granted",
-        description=f"Granted {amount} tokens to {user.mention}",
-        color=0x00ff00
-    )
-    embed.add_field(name="New Balance", value=f"{current_tokens} tokens", inline=False)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='remove_tokens')
-@commands.has_permissions(administrator=True)
-async def remove_tokens(ctx, user: discord.Member, amount: int):
-    """Remove tokens from a player (Admin only)"""
-    if amount <= 0:
-        await ctx.send("Amount must be positive!")
-        return
-    
-    current_tokens = get_user_tokens(user.id)
-    if current_tokens < amount:
-        await ctx.send(f"{user.mention} only has {current_tokens} tokens!")
-        return
-    
-    remove_user_tokens(user.id, amount)
-    new_tokens = get_user_tokens(user.id)
-    
-    embed = discord.Embed(
-        title="💸 Tokens Removed",
-        description=f"Removed {amount} tokens from {user.mention}",
-        color=0xff6b6b
-    )
-    embed.add_field(name="New Balance", value=f"{new_tokens} tokens", inline=False)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='set_tokens')
-@commands.has_permissions(administrator=True)
-async def set_tokens(ctx, user: discord.Member, amount: int):
-    """Set a player's token balance (Admin only)"""
-    if amount < 0:
-        await ctx.send("Amount cannot be negative!")
-        return
-    
-    old_tokens = get_user_tokens(user.id)
-    set_user_tokens(user.id, amount)
-    
-    embed = discord.Embed(
-        title="🔧 Tokens Set",
-        description=f"Set {user.mention}'s token balance to {amount}",
-        color=0x3498db
-    )
-    embed.add_field(name="Previous Balance", value=f"{old_tokens} tokens", inline=True)
-    embed.add_field(name="New Balance", value=f"{amount} tokens", inline=True)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='tokens', aliases=['balance', 'bal'])
-async def check_tokens(ctx, user: discord.Member = None):
-    """Check token balance"""
-    target_user = user or ctx.author
-    tokens = get_user_tokens(target_user.id)
-    
-    embed = discord.Embed(
-        title="💰 Token Balance",
-        color=0xffd700
-    )
-    embed.set_thumbnail(url=target_user.display_avatar.url)
-    embed.add_field(name=f"{target_user.display_name}'s Balance", value=f"{tokens} tokens", inline=False)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='leaderboard', aliases=['top', 'rich'])
-async def token_leaderboard(ctx, limit: int = 10):
-    """Show token leaderboard"""
-    if limit > 20:
-        limit = 20
-    
-    # Sort users by tokens
-    sorted_users = sorted(user_tokens.items(), key=lambda x: x[1], reverse=True)
-    
-    if not sorted_users:
-        await ctx.send("No users have tokens yet!")
-        return
-    
-    embed = discord.Embed(
-        title="🏆 Token Leaderboard",
-        color=0xffd700
-    )
-    
-    leaderboard_text = []
-    for i, (user_id, tokens) in enumerate(sorted_users[:limit]):
-        try:
-            user = bot.get_user(int(user_id))
-            if user:
-                medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
-                leaderboard_text.append(f"{medal} {user.display_name}: {tokens} tokens")
-        except:
-            continue
-    
-    if leaderboard_text:
-        embed.description = "\n".join(leaderboard_text)
-    else:
-        embed.description = "No valid users found!"
-    
-    await ctx.send(embed=embed)
-
 # Enhanced bot commands
 @bot.command(name='create_table')
 @commands.has_permissions(administrator=True)
@@ -1315,44 +1178,5 @@ async def on_ready():
     print(f'Bot is ready to deal some cards and tokens!')
     print(f'Loaded {len(user_tokens)} users with tokens')
 
-@bot.command(name='help_blackjack')
-async def help_blackjack(ctx):
-    """Show blackjack bot help"""
-    embed = discord.Embed(
-        title="🎰 Blackjack Bot Help",
-        description="Welcome to the casino! Here's how to play:",
-        color=0xffd700
-    )
-    
-    embed.add_field(
-        name="🎲 For Players",
-        value="`!tokens` - Check your balance\n`!bet <amount>` - Place a bet\n`!leaderboard` - View top players",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🎮 Game Actions",
-        value="**Hit** - Take another card\n**Stand** - Keep your current hand\n**Double** - Double your bet and take one card\n**Split** - Split matching pairs into two hands",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="👑 Admin Commands",
-        value="`!create_table [id]` - Create a new table\n`!start_betting <table>` - Start betting phase\n`!start_game <table>` - Start the game\n`!deal_new_hand <table>` - Deal a new round\n`!close_table <table>` - Close a table\n`!grant_tokens <user> <amount>` - Give tokens\n`!remove_tokens <user> <amount>` - Remove tokens\n`!set_tokens <user> <amount>` - Set token balance",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="💰 Payouts",
-        value="**Blackjack**: 3:2 (1.5x your bet)\n**Win**: 2:1 (1x your bet)\n**Push**: 1:1 (bet returned)\n**Lose**: 0:1 (lose your bet)",
-        inline=False
-    )
-    
-    embed.set_footer(text="Good luck at the tables! 🍀")
-    
-    await ctx.send(embed=embed)
-
-# Run the bot
-if __name__ == "__main__":
-    # Replace with your actual bot token
-    bot.run(os.getenv('TOKEN'))
+async def setup(bot):
+    await bot.add_cog(Blackjack(bot))
