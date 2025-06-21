@@ -982,6 +982,92 @@ async def start_betting(ctx, table_id: str = None):
     await ctx.send(f"Betting phase started in {game_channel.mention}!")
     await game_channel.send("🎰 **Place your bets!** Use the buttons below or type `!bet <amount>`")
 
+@bot.command(name='bet')
+async def place_bet_command(ctx, amount: int):
+    """Place a bet using command"""
+    # Find table for this user
+    user_table = None
+    for table in tables.values():
+        if table.game_channel_id == ctx.channel.id:
+            if any(p.user.id == ctx.author.id for p in table.players):
+                user_table = table
+                break
+    
+    if not user_table:
+        await ctx.send("You're not in a game in this channel!")
+        return
+    
+    if user_table.state != GameState.BETTING:
+        await ctx.send("Betting phase is not active!")
+        return
+    
+    player = next((p for p in user_table.players if p.user.id == ctx.author.id), None)
+    if not player:
+        await ctx.send("You're not in this game!")
+        return
+    
+    if player.has_bet:
+        await ctx.send("You've already placed a bet!")
+        return
+    
+    if amount <= 0:
+        await ctx.send("Bet must be a positive number!")
+        return
+    
+    if not player.can_afford_bet(amount):
+        tokens = get_user_tokens(player.user.id)
+        await ctx.send(f"Not enough tokens! You have {tokens}, need {amount}.")
+        return
+    
+    # Place the bet
+    player.hands[0].bet = amount
+    player.has_bet = True
+    remove_user_tokens(player.user.id, amount)
+    
+    # Update betting embed
+    if user_table.betting_embed_message:
+        betting_embed = create_betting_embed(user_table)
+        betting_view = BettingView(user_table)
+        try:
+            await user_table.betting_embed_message.edit(embed=betting_embed, view=betting_view)
+        except:
+            pass
+    
+    await ctx.send(f"✅ Bet placed: {amount} tokens!")
+
+@bot.command(name='leave')
+async def leave_table_command(ctx, table_id: str = None):
+    """Leave the current table"""
+    if table_id is None:
+        guild_tables = [tid for tid, table in tables.items() if table.guild_id == ctx.guild.id]
+        if len(guild_tables) == 0:
+            await ctx.send("No tables found!")
+            return
+        elif len(guild_tables) == 1:
+            table_id = guild_tables[0]
+        else:
+            table_list = ", ".join(guild_tables)
+            await ctx.send(f"Multiple tables found: {table_list}\nPlease specify: `!leave <table_id>`")
+            return
+    
+    if table_id not in tables:
+        await ctx.send(f"Table '{table_id}' not found!")
+        return
+    
+    table = tables[table_id]
+    player = next((p for p in table.players if p.user.id == ctx.author.id), None)
+    
+    if not player:
+        await ctx.send("You're not in this table!")
+        return
+    
+    if table.state == GameState.PLAYING:
+        await ctx.send("You can't leave during game play!")
+        return
+    
+    table.remove_player(ctx.author.id)
+    await ctx.send(f"You've left table {table_id}!")
+
 @bot.command(name='start_game')
 @commands.has_permissions(administrator=True)
 async def start_game(ctx, table_id: str = None):
