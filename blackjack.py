@@ -8,6 +8,9 @@ from typing import Dict, List, Optional
 import random
 from dataclasses import dataclass, field
 from enum import Enum
+import dotenv
+
+dotenv.load_dotenv()
 
 # Bot setup
 intents = discord.Intents.default()
