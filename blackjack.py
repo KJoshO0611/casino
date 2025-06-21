@@ -286,22 +286,23 @@ def create_betting_embed(table: BlackjackTable) -> discord.Embed:
     return embed
 
 def create_dealer_embed(table: BlackjackTable) -> discord.Embed:
-    embed = discord.Embed(title=f"🃏 Blackjack Table {table.table_id}", color=0x00ff00)
-    
-    dealer_value = ""
-    if table.state == GameState.PLAYING and len(table.dealer_cards) > 1:
-        dealer_value = f" (Showing: {table.dealer_cards[0].value()})"
-    elif table.state == GameState.FINISHED or len(table.dealer_cards) == 1:
-        dealer_value = f" (Value: {table.dealer_hand_value()})"
-    
-    embed.add_field(
-        name=f"🎩 Dealer Cards{dealer_value}",
-        value=table.dealer_cards_str(hide_hole_card=(table.state == GameState.PLAYING)),
-        inline=False
+    """Create dealer's embed showing their cards"""
+    embed = discord.Embed(
+        title=" Dealer's Hand ",
+        description="",
+        color=0x0099ff
     )
     
-    if table.state == GameState.PLAYING:
-        current_player = table.get_current_player()
+    # Show dealer's cards (showing only one card during play)
+    dealer_cards = table.dealer_cards
+    if table.state == GameState.PLAYING and len(dealer_cards) > 0:
+        # Show both cards if dealer has natural blackjack
+        dealer_value = sum([10 if card.rank in ['J', 'Q', 'K'] else 11 if card.rank == 'A' else int(card.rank) 
+                          for card in dealer_cards[:2]])
+        if dealer_value != 21:
+            dealer_cards = [dealer_cards[0], Card('?', '?')]  # Hide second card
+        else:
+            dealer_cards = dealer_cards[:2]  # Show both cards if dealer has natural blackjack
         if current_player:
             hand_info = f"Hand {current_player.current_hand_index + 1}"
             if len(current_player.hands) > 1:
@@ -1065,8 +1066,16 @@ async def leave_table_command(ctx, table_id: str = None):
         await ctx.send("You can't leave during game play!")
         return
     
+    # Check if there are other players with bets
+    other_players_with_bets = any(p.has_bet for p in table.players if p.user.id != ctx.author.id)
+    
+    # Remove the player
     table.remove_player(ctx.author.id)
     await ctx.send(f"You've left table {table_id}!")
+    
+    # If other players have bets, start the game
+    if other_players_with_bets:
+        await start_game(ctx, table_id)
 
 @bot.command(name='start_game')
 @commands.has_permissions(administrator=True)
