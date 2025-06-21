@@ -1077,6 +1077,49 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
+@bot.command(name='start')
+async def start_game(ctx):
+    """Start the poker game in the current channel"""
+    channel_id = ctx.channel.id
+    
+    # Find the table that has this channel
+    table = tables.get(channel_id)
+    if not table:
+        await ctx.send("❌ No poker table exists in this channel! Use !poker to create one.")
+        return
+    
+    if not table.game_active:
+        if len(table.players) < 2:
+            await ctx.send("❌ Need at least 2 players to start the game!")
+            return
+        
+        # Start the game
+        if table.start_game():
+            await ctx.send("🎮 Game started! Check the private poker channel.")
+            await ctx.guild.get_channel(table.private_channel_id).send("🎮 Game started!")
+            await PokerLobbyView(table).send_game_state(ctx.guild)
+            await PokerLobbyView(table).send_private_cards(ctx.guild)
+        else:
+            await ctx.send("❌ Could not start game")
+    else:
+        await ctx.send("❌ Game is already in progress!")
+
+@bot.command(name='addchips')
+@commands.has_permissions(manage_guild=True)
+async def add_chips(ctx, amount: int, user: discord.Member = None):
+    """Add chips to a player's balance. If no user is specified, adds to the command author."""
+    if user is None:
+        user = ctx.author
+    
+    # Get current chips
+    current_chips = chip_db.get_player_chips(user.id)
+    
+    # Add chips
+    new_chips = current_chips + amount
+    chip_db.set_player_chips(user.id, new_chips)
+    
+    await ctx.send(f"💰 Added {amount} chips to {user.display_name}'s balance!\nNew balance: {new_chips} chips")
+
 # Run the bot
 if __name__ == "__main__":
     # Replace 'YOUR_BOT_TOKEN' with your actual bot token
