@@ -40,7 +40,9 @@ class SlotsCog(commands.Cog):
         winnings = self.machine.calculate_winnings(result, amount)
 
         if winnings > 0:
-            token_manager.add_chips(user_id, winnings + amount) # Return original bet + winnings
+            repayment_message = token_manager.add_chips(user_id, winnings + amount) # Return original bet + winnings
+            if repayment_message:
+                await ctx.send(repayment_message)
             await ctx.send(f"🎉 **Congratulations!** You won **{winnings}** chips! 🎉")
         else:
             await ctx.send("Sorry, not a winning spin. Better luck next time!")

@@ -95,9 +95,11 @@ class RouletteCog(commands.Cog):
         winners_str = ""
         for user_id, amount_won in winnings.items():
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+            repayment_message = token_manager.add_chips(user_id, amount_won)
+            if repayment_message:
+                await ctx.send(repayment_message)
             if amount_won > 0:
                 winners_str += f"{user.mention} won **{amount_won}** chips!\n"
-                token_manager.add_chips(user_id, amount_won)
             else:
                  winners_str += f"{user.mention} lost **{-amount_won}** chips.\n"
 

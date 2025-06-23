@@ -298,10 +298,14 @@ class BlackjackCog(commands.Cog):
                     player_result += f"- {hand_id}: Bust! Lost {hand.bet} tokens.\n"
                 elif dealer_bust or hand.hand_value() > dealer_value:
                     winnings = int(hand.bet * 1.5 if hand.is_natural_blackjack else hand.bet)
-                    token_manager.add_chips(player.user_id, hand.bet + winnings)
+                    repayment_message = token_manager.add_chips(player.user_id, hand.bet + winnings)
+                    if repayment_message:
+                        await ctx.send(repayment_message)
                     player_result += f"- {hand_id}: Win! Gained {winnings} tokens.\n"
                 elif hand.hand_value() == dealer_value:
-                    token_manager.add_chips(player.user_id, hand.bet)
+                    repayment_message = token_manager.add_chips(player.user_id, hand.bet)
+                    if repayment_message:
+                        await ctx.send(repayment_message)
                     player_result += f"- {hand_id}: Push! Bet of {hand.bet} returned.\n"
                 else:
                     player_result += f"- {hand_id}: Lose! Lost {hand.bet} tokens.\n"
@@ -500,7 +504,9 @@ class BlackjackCog(commands.Cog):
         for player in table.players:
             for hand in player.hands:
                 if hand.bet > 0:
-                    token_manager.add_chips(player.user_id, hand.bet)
+                    repayment_message = token_manager.add_chips(player.user_id, hand.bet)
+                    if repayment_message:
+                        await ctx.send(repayment_message)
         if table.game_channel_id:
             game_channel = self.bot.get_channel(table.game_channel_id)
             if game_channel:
