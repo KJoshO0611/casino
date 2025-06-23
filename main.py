@@ -12,9 +12,6 @@ intents = discord.Intents.all()
 intents.message_content = True
 intents.members = True
 
-# Configure logging using discord.py's utility
-discord.utils.setup_logging(level=logging.INFO, root=False)
-
 class CasinoBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
@@ -50,13 +47,22 @@ class CasinoBot(commands.Bot):
     @commands.is_owner()
     async def reload(self, ctx, cog: str):
         """Reloads a cog."""
+        cog_name = f"{cog}_cog"
         try:
-            await self.reload_extension(f"{cog}")
-            await ctx.send(f"'{cog}' reloaded successfully.")
-        except commands.ExtensionError as e:
-            await ctx.send(f"Error reloading '{cog}': {e}")
+            await self.reload_extension(cog_name)
+            await ctx.send(f"'{cog_name}' reloaded successfully.")
+        except commands.ExtensionNotLoaded:
+            await self.load_extension(cog_name)
+            await ctx.send(f"'{cog_name}' was not loaded, so it has been loaded now.")
+        except commands.ExtensionNotFound:
+            await ctx.send(f"Cog '{cog_name}' not found.")
+        except Exception as e:
+            await ctx.send(f"Error reloading '{cog_name}': {e}")
 
 if __name__ == "__main__":
+    # Configure logging using discord.py's utility
+    logging.basicConfig(level=logging.INFO)
+
     print(f"--- Starting Bot (PID: {os.getpid()}) ---")
     bot = CasinoBot()
     bot.run(os.getenv('TOKEN'))

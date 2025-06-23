@@ -107,6 +107,12 @@ class Player:
     
     def total_bet(self) -> int:
         return sum(hand.bet for hand in self.hands)
+
+    def reset(self):
+        """Resets the player for a new round."""
+        self.hands = [Hand()]
+        self.current_hand_index = 0
+        self.has_bet = False
     
     
     
@@ -125,6 +131,8 @@ class BlackjackTable:
     guild_id: int
     channel_id: int
     game_channel_id: int
+    lobby_channel_id: Optional[int] = None
+    lobby_message_id: Optional[int] = None
     message_id: Optional[int] = None
     players: List[Player] = field(default_factory=list)
     dealer_cards: List[Card] = field(default_factory=list)
@@ -142,23 +150,28 @@ class BlackjackTable:
         return True
     
     def remove_player(self, user_id: int) -> bool:
+        initial_player_count = len(self.players)
         self.players = [p for p in self.players if p.user_id != user_id]
-        return True
+        return len(self.players) < initial_player_count
     
     def get_current_player(self) -> Optional[Player]:
         if 0 <= self.current_player_index < len(self.players):
             return self.players[self.current_player_index]
         return None
+
+    def reset_round(self):
+        """Resets the table for a new round of betting."""
+        self.deck.reset()
+        self.dealer_cards = []
+        self.current_player_index = 0
+        self.state = GameState.BETTING
+        self.message_id = None
+        for player in self.players:
+            player.reset()
     
     def next_player(self):
-        current_player = self.get_current_player()
-        if current_player:
-            current_player.next_hand()
-            if not current_player.has_more_hands():
-                self.current_player_index += 1
-                if self.current_player_index < len(self.players):
-                    self.players[self.current_player_index].current_hand_index = 0
-        else:
+        """Moves to the next player."""
+        if self.current_player_index < len(self.players):
             self.current_player_index += 1
     
     def dealer_hand_value(self) -> int:

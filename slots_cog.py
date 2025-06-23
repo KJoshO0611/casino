@@ -45,5 +45,15 @@ class SlotsCog(commands.Cog):
         else:
             await ctx.send("Sorry, not a winning spin. Better luck next time!")
 
+    @play_slots.error
+    async def play_slots_error(self, ctx, error):
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send("Please specify an amount to bet. Usage: `!slots <amount>`")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send("Invalid amount. Please enter a number. Usage: `!slots <amount>`")
+        else:
+            print(f'Ignoring exception in command {ctx.command}: {error}')
+            await ctx.send("An unexpected error occurred.")
+
 async def setup(bot):
     await bot.add_cog(SlotsCog(bot))

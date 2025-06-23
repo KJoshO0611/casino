@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  casino:
+    image: sleepykei/casino:latest  # Use the pre-built image, do not build
+    container_name: casino_app
+    ports:
+      - "8000:8000"
+    working_dir: /app
+    command: python main.py
+    volumes:
+      - ./user_tokens.json:/app/user_tokens.json
+    # Uncomment the following if you want to mount your code for live editing
+    # - .:/app
