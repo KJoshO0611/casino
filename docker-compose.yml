@@ -1,7 +1,7 @@
 version: '3.8'
 services:
   casino:
-    build: .  # Build from the Dockerfile in the current directory
+    image: sleepykei/casino
     container_name: casino_app
     ports:
       - "8000:8000"
