@@ -274,45 +274,45 @@ class BlackjackCog(commands.Cog):
         dealer_value = table.dealer_hand_value()
         dealer_bust = dealer_value > 21
         results = []
+        game_channel = guild.get_channel(table.game_channel_id)
 
         # Disable buttons on the game embed
-        game_channel = guild.get_channel(table.game_channel_id)
         if game_channel and table.message_id:
             try:
                 message = await game_channel.fetch_message(table.message_id)
                 view = GameView(self, table)
                 view.disable_all_buttons()
                 await message.edit(view=view)
-            except discord.NotFound:
-                print(f"Could not find message {table.message_id} to disable buttons.")
-            except discord.Forbidden:
-                print(f"Could not edit message {table.message_id} to disable buttons.")
-
+            except (discord.NotFound, discord.Forbidden) as e:
+                print(f"Error updating game message {table.message_id}: {e}")
 
         for player in table.players:
             player_result = f"**{player.username}'s Results:**\n"
             for i, hand in enumerate(player.hands):
                 hand_id = f"Hand {i+1}"
                 if hand.is_bust:
-                    winnings = -hand.bet
                     player_result += f"- {hand_id}: Bust! Lost {hand.bet} tokens.\n"
                 elif dealer_bust or hand.hand_value() > dealer_value:
                     winnings = int(hand.bet * 1.5 if hand.is_natural_blackjack else hand.bet)
+                    # Return original bet + winnings
                     repayment_message = token_manager.add_chips(player.user_id, hand.bet + winnings)
-                    if repayment_message:
-                        await ctx.send(repayment_message)
+                    if repayment_message and game_channel:
+                        await game_channel.send(repayment_message)
                     player_result += f"- {hand_id}: Win! Gained {winnings} tokens.\n"
                 elif hand.hand_value() == dealer_value:
+                    # Return original bet
                     repayment_message = token_manager.add_chips(player.user_id, hand.bet)
-                    if repayment_message:
-                        await ctx.send(repayment_message)
+                    if repayment_message and game_channel:
+                        await game_channel.send(repayment_message)
                     player_result += f"- {hand_id}: Push! Bet of {hand.bet} returned.\n"
-                else:
+                else: # Lost
                     player_result += f"- {hand_id}: Lose! Lost {hand.bet} tokens.\n"
             results.append(player_result)
 
-        await game_channel.send("\n".join(results))
-        await game_channel.send("Round finished! Use `!start_betting` for the next round.")
+        if game_channel:
+            await game_channel.send("\n".join(results))
+            await game_channel.send("Round finished! Use `!start_betting` for the next round.")
+        
         table.state = GameState.WAITING
         await self.update_lobby_embed(table)
 
