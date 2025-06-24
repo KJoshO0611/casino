@@ -411,7 +411,7 @@ class BlackjackCog(commands.Cog):
             await ctx.send("All players have bet! Starting game...")
             await self.start_game_logic(ctx.guild, table)
 
-    @commands.command(name='create_table')
+    @commands.command(name='create_table', aliases=['blackjack'])
     @commands.has_permissions(administrator=True)
     async def create_table(self, ctx, table_id: str = None):
         
@@ -419,7 +419,7 @@ class BlackjackCog(commands.Cog):
         await ctx.message.delete()
 
         if table_id is None:
-            table_id = f"table-{random.randint(1000, 9999)}"
+            table_id = f"bj-{random.randint(1000, 9999)}"
         if table_id in self.tables:
             await ctx.send(f"Table '{table_id}' already exists!", delete_after=10)
             return

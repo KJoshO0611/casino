@@ -8,7 +8,7 @@ from token_manager import token_manager
 from roulette_components import BetTypeButton, BetAmountModal
 
 # Update this URL with your actual roulette table image
-ROULETTE_TABLE_URL = "https://i.imgur.com/JRAK4qR.png"
+ROULETTE_TABLE_URL = "https://cdn.discordapp.com/attachments/1386698939230584932/1386948821879230474/american-roulette-table-layout-with-bets-and-options-vector.png?ex=685b903f&is=685a3ebf&hm=d59c54df8010ff14efce1edbbc98823c37ed59b835016cca95226ebaaea2ea1a&"
 
 class RouletteCog(commands.Cog):
     def __init__(self, bot):
@@ -22,9 +22,10 @@ class RouletteCog(commands.Cog):
         
         # Group bet types into rows
         bet_groups = [
-            [BetType.RED, BetType.BLACK, BetType.ODD, BetType.EVEN],
+            [BetType.STRAIGHT_UP, BetType.SPLIT, BetType.STREET, BetType.CORNER, BetType.LINE],
+            [BetType.RED, BetType.BLACK, BetType.ODD, BetType.EVEN, BetType.FIRST_FOUR],
             [BetType.LOW, BetType.HIGH, BetType.DOZEN_1, BetType.DOZEN_2, BetType.DOZEN_3],
-            [BetType.COLUMN_1, BetType.COLUMN_2, BetType.COLUMN_3, BetType.STRAIGHT_UP]
+            [BetType.COLUMN_1, BetType.COLUMN_2, BetType.COLUMN_3]
         ]
         
         # Add buttons to the view
@@ -59,31 +60,23 @@ class RouletteCog(commands.Cog):
         modal.place_bet = self.place_bet_from_modal
         await interaction.response.send_modal(modal)
     
-    async def place_bet_from_modal(self, interaction: discord.Interaction, amount: int, number: Optional[int] = None):
+    async def place_bet_from_modal(self, interaction: discord.Interaction, bet_type: BetType, amount: int, numbers: Optional[List[int]] = None):
         """Handles the bet placement from the modal."""
         channel_id = interaction.channel_id
         if channel_id not in self.games:
             await interaction.response.send_message("No active roulette game in this channel.", ephemeral=True)
             return
-            
+
         user_id = interaction.user.id
         game = self.games[channel_id]
-        
-        # Get bet type from the button that was clicked
-        # This is a bit tricky since we don't have direct access to the button that triggered the modal
-        # So we'll use the bet_type that was passed to the modal
-        bet_type = self.bet_type
-        
-        if number is not None:
-            bet_value = number
-            bet_type_str = f"{bet_type.value.lower()} on {number}"
-        else:
-            bet_value = None
-            bet_type_str = bet_type.value.lower()
-        
-        token_manager.add_chips(user_id, -amount)
+
+        bet_value = numbers
+        bet_type_str = bet_type.value
+        if numbers:
+            bet_type_str += f" on {', '.join(map(str, numbers))}"
+
         game.place_bet(user_id, bet_type, bet_value, amount)
-        
+
         await interaction.response.send_message(
             f"{interaction.user.mention} placed a bet of {amount} chips on {bet_type_str}.",
             ephemeral=False
@@ -116,7 +109,6 @@ class RouletteCog(commands.Cog):
         await ctx.send("🎲 **Betting is open!** Use the buttons above to place your bets. 🎲")
         
         # Store the view to prevent it from being garbage collected
-        self.bot.add_view(view)
 
     @commands.command(name='bet_types')
     async def list_bet_types(self, ctx):
@@ -128,8 +120,8 @@ class RouletteCog(commands.Cog):
         embed.description = bet_info
         await ctx.send(embed=embed)
 
-    @commands.command(name='rbet')
-    async def place_bet(self, ctx, amount: int, bet_type_str: str, bet_value: str = None):
+    @commands.command(name='bet', description="Place a bet using text commands. e.g., !bet 100 split 8,9")
+    async def place_bet(self, ctx, amount: int, bet_type_str: str, *, bet_value: str = None):
         """Places a bet on the roulette table."""
         channel_id = ctx.channel.id
         if channel_id not in self.games:
@@ -149,18 +141,47 @@ class RouletteCog(commands.Cog):
 
         game = self.games[channel_id]
         
-        # For bets that require a number
-        if bet_type == BetType.STRAIGHT_UP:
-            if bet_value is None or not bet_value.isdigit() or not (0 <= int(bet_value) <= 36):
-                await ctx.send("A `straight_up` bet requires a number between 0 and 36.")
-                return
-            value_to_bet = int(bet_value)
-        else:
-            value_to_bet = None # For color, even/odd, etc.
+        value_to_bet = None
+        bet_display_value = ""
 
-        token_manager.add_chips(user_id, -amount)
+        BETS_WITH_NUMBERS = {
+            BetType.STRAIGHT_UP: 1,
+            BetType.SPLIT: 2,
+            BetType.STREET: 3,
+            BetType.CORNER: 4,
+            BetType.LINE: 6,
+        }
+
+        if bet_type in BETS_WITH_NUMBERS:
+            if bet_value is None:
+                await ctx.send(f"A `{bet_type.value}` bet requires numbers. Example: `!bet {amount} {bet_type_str.lower()} 1,2,3`")
+                return
+            
+            try:
+                numbers = [int(n.strip()) for n in bet_value.split(',')]
+                if any(not (0 <= n <= 36) for n in numbers):
+                    raise ValueError("Numbers must be between 0 and 36.")
+
+                required_count = BETS_WITH_NUMBERS[bet_type]
+                if len(numbers) != required_count:
+                    raise ValueError(f"This bet requires exactly {required_count} number(s).")
+
+                if bet_type == BetType.STRAIGHT_UP:
+                    value_to_bet = numbers[0]
+                else:
+                    value_to_bet = numbers
+                
+                bet_display_value = f" on {', '.join(map(str, numbers))}"
+
+            except ValueError as e:
+                await ctx.send(f"Invalid input for numbers: {e}")
+                return
+
+        elif bet_type == BetType.FIRST_FOUR:
+            value_to_bet = [0, 1, 2, 3]
+        
         game.place_bet(user_id, bet_type, value_to_bet, amount)
-        await ctx.send(f"{ctx.author.display_name} has placed a bet of {amount} chips on `{bet_type_str.lower()}`.")
+        await ctx.send(f"{ctx.author.display_name} has placed a bet of {amount} chips on `{bet_type.value}{bet_display_value}`.")
 
     @commands.command(name='spin')
     @commands.has_permissions(manage_guild=True)
@@ -237,5 +258,5 @@ class RouletteCog(commands.Cog):
         for view in self.active_views.values():
             view.stop()
 
-def setup(bot):
-    bot.add_cog(RouletteCog(bot))
+async def setup(bot):
+    await bot.add_cog(RouletteCog(bot))

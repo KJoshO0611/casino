@@ -4,6 +4,11 @@ from typing import Dict, List, Tuple
 
 class BetType(Enum):
     STRAIGHT_UP = "Straight Up"
+    SPLIT = "Split (2 numbers)"
+    STREET = "Street (3 numbers)"
+    CORNER = "Corner (4 numbers)"
+    FIRST_FOUR = "First Four (0,1,2,3)"
+    LINE = "Line (6 numbers)"
     RED = "Red"
     BLACK = "Black"
     ODD = "Odd"
@@ -26,6 +31,11 @@ class RouletteWheel:
         }
         self.payouts: Dict[BetType, int] = {
             BetType.STRAIGHT_UP: 35,
+            BetType.SPLIT: 17,
+            BetType.STREET: 11,
+            BetType.CORNER: 8,
+            BetType.FIRST_FOUR: 8,
+            BetType.LINE: 5,
             BetType.RED: 1,
             BetType.BLACK: 1,
             BetType.ODD: 1,
@@ -45,13 +55,19 @@ class RouletteWheel:
         return number, self.numbers[number]
 
     def check_win(self, bet_type: BetType, bet_value, winning_number: int) -> bool:
+        if bet_type == BetType.STRAIGHT_UP:
+            return bet_value == winning_number
+        
+        # New bet types that take a list of numbers
+        if bet_type in [BetType.SPLIT, BetType.STREET, BetType.CORNER, BetType.LINE, BetType.FIRST_FOUR]:
+            return winning_number in bet_value
+
+        # All outside bets lose on 0
         if winning_number == 0:
-            return False # 0 loses on all outside bets
+            return False
 
         winning_color = self.numbers[winning_number]
 
-        if bet_type == BetType.STRAIGHT_UP:
-            return bet_value == winning_number
         if bet_type == BetType.RED:
             return winning_color == 'red'
         if bet_type == BetType.BLACK:

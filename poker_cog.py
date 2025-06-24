@@ -52,6 +52,11 @@ class PokerLobbyView(discord.ui.View):
             return
 
         if table.add_player(user_id, username, chips):
+            # Grant access to the private channel
+            private_channel = interaction.guild.get_channel(table.private_channel_id)
+            if private_channel:
+                await private_channel.set_permissions(interaction.user, read_messages=True)
+            
             await self._update_lobby_message(cog, interaction, table)
             await interaction.followup.send(f"You have joined the game with {chips} chips.", ephemeral=True)
         else:
@@ -72,6 +77,11 @@ class PokerLobbyView(discord.ui.View):
 
         player = table.get_player(interaction.user.id)
         if player:
+            # Revoke access to the private channel
+            private_channel = interaction.guild.get_channel(table.private_channel_id)
+            if private_channel:
+                await private_channel.set_permissions(interaction.user, overwrite=None)
+
             token_manager.set_chips(player.user_id, player.chips)
             table.remove_player(interaction.user.id)
             await self._update_lobby_message(cog, interaction, table)
@@ -99,8 +109,8 @@ class PokerCog(commands.Cog):
 
     def create_lobby_embed(self, table: PokerTable) -> discord.Embed:
         embed = discord.Embed(title="Poker Table", description=f"Game will be played in <#{table.private_channel_id}>", color=discord.Color.blue())
-        players = "\n".join([p.username for p in table.players]) if table.players else "No players yet."
-        embed.add_field(name="Players", value=players, inline=False)
+        player_list = "\n".join([p.username for p in table.players]) if table.players else "No players yet."
+        embed.add_field(name=f"Players ({len(table.players)}/{table.max_players})", value=player_list, inline=False)
         embed.set_footer(text=f"Game State: {table.state.value.upper()}")
         return embed
 
@@ -181,7 +191,7 @@ class PokerCog(commands.Cog):
         if not player_statuses:
             player_statuses.append("No players at the table.")
 
-        embed.add_field(name="Players", value="\n".join(player_statuses), inline=False)
+        embed.add_field(name=f"Players ({len(game_state['players'])}/{table.max_players})", value="\n".join(player_statuses), inline=False)
         
         if game_state['game_active']:
             current_player = next((p for p in game_state['players'] if p['is_current_turn']), None)
@@ -219,16 +229,63 @@ class PokerCog(commands.Cog):
     async def start_game(self, ctx):
         table = self._get_table_by_lobby(ctx.channel.id)
         if not table:
-            await ctx.send("No poker table found for this channel. Use `!poker` to create one.")
+            table = self._get_table_by_game_channel(ctx.channel.id)
+
+        if not table:
+            await ctx.send("No poker table found for this channel. Use `!poker` to create one or use the command in the lobby/game channel.")
             return
-        if table.start_game():
+        
+        success, message = table.start_game()
+        if success:
             private_channel = self.bot.get_channel(table.private_channel_id)
+            # Send confirmation in the channel where the command was used
             await ctx.send(f"Game started! Check the private poker channel: {private_channel.mention} and your DMs for your cards.")
+            
+            # Also send a message in the lobby channel if it's different
+            if ctx.channel.id != table.lobby_channel_id:
+                lobby_channel = self.bot.get_channel(table.lobby_channel_id)
+                if lobby_channel:
+                    await lobby_channel.send(f"The game has started! See {private_channel.mention}.")
+
             await self.update_lobby_message(table)
             await self.send_private_hands(table)
             await self.send_game_state(table, private_channel)
         else:
-            await ctx.send("Not enough players to start.")
+            await ctx.send(message)
+
+    @commands.command(name='close')
+    @commands.has_permissions(manage_channels=True)
+    async def close_table(self, ctx):
+        """Closes the poker table and deletes its private channel."""
+        table = self._get_table_by_lobby(ctx.channel.id)
+        if not table:
+            await ctx.send("No poker table found for this channel to close.")
+            return
+
+        # Delete the private channel
+        private_channel = self.bot.get_channel(table.private_channel_id)
+        if private_channel:
+            try:
+                await private_channel.delete(reason=f"Poker table closed by {ctx.author}.")
+            except discord.Forbidden:
+                await ctx.send("I don't have permissions to delete the channel.")
+            except discord.HTTPException as e:
+                await ctx.send(f"Failed to delete channel: {e}")
+
+        # Delete the lobby message
+        lobby_channel = self.bot.get_channel(table.lobby_channel_id)
+        if lobby_channel:
+            try:
+                lobby_message = await lobby_channel.fetch_message(table.lobby_message_id)
+                await lobby_message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass  # Message already gone or can't delete
+
+        # Remove the table from tracking
+        if table.lobby_channel_id in self.tables:
+            del self.tables[table.lobby_channel_id]
+
+        await ctx.send("Poker table has been closed.")
 
     @commands.command(name='call')
     async def call_action(self, ctx):
