@@ -252,8 +252,6 @@ class BlackjackCog(commands.Cog):
 
     async def dealer_turn(self, guild: discord.Guild, table: BlackjackTable):
         """Handles the dealer's turn, revealing their card and drawing until 17 or more."""
-        table.state = GameState.FINISHED
-        
         # Reveal the hidden card first
         await self.send_game_state_embed(guild, table, hide_dealer_card=False)
         await asyncio.sleep(1.5)
@@ -262,45 +260,49 @@ class BlackjackCog(commands.Cog):
         while table.dealer_hand_value() < 17:
             table.dealer_cards.append(table.deck.deal())
             await self.send_game_state_embed(guild, table, hide_dealer_card=False)
+            await asyncio.sleep(1.5)
+
         # Final state before resolving bets
         await self.send_game_state_embed(guild, table, hide_dealer_card=False)
+        await asyncio.sleep(1)
+
+        await self.resolve_bets(guild, table)
 
     async def resolve_bets(self, guild: discord.Guild, table: BlackjackTable):
-        dealer_hand = table.dealer.current_hand
-        dealer_score = dealer_hand.get_score()
+        dealer_score = table.dealer_hand_value()
+        dealer_busted = dealer_score > 21
         results = []
 
         pool_balance = token_manager.get_pool_balance()
-        max_payout = int(pool_balance * 0.15) # Cap total payout at 15% of the pool
+        max_payout = int(pool_balance * 0.15)  # Cap total payout at 15% of the pool
 
         for player in table.players:
             player_results = []
             for i, hand in enumerate(player.hands):
-                hand_id = f" (Hand {i+1})" if len(player.hands) > 1 else ""
-                player_score = hand.get_score()
+                hand_id = f" (Hand {i + 1})" if len(player.hands) > 1 else ""
+                player_score = hand.hand_value()
                 result_str = ""
 
                 # Determine outcome and total payout
-                if hand.is_busted:
-                    result_str = f"{player.display_name}{hand_id}: Busted! Lost {hand.bet} chips."
-                elif dealer_hand.is_busted or player_score > dealer_score:
-                    # Player wins
-                    total_payout = int(hand.bet * 2.5) if hand.is_blackjack else (hand.bet * 2)
+                if hand.is_bust:
+                    result_str = f"{player.username}{hand_id}: Busted! Lost {hand.bet} chips."
+                elif dealer_busted or player_score > dealer_score:
+                    # Player wins. Blackjack pays 3:2, win pays 1:1
+                    total_payout = int(hand.bet * 2.5) if hand.is_natural_blackjack else (hand.bet * 2)
                     if total_payout > max_payout:
-                        result_str = f"{player.display_name}{hand_id}: Bet of {hand.bet} was too large for the table and is forfeited to the house!"
+                        result_str = f"{player.username}{hand_id}: Bet of {hand.bet} was too large and is forfeited to the house!"
                     else:
                         token_manager.add_chips(player.user_id, total_payout, source_id=token_manager.CASINO_POOL_ID)
                         win_amount = total_payout - hand.bet
-                        result_str = f"{player.display_name}{hand_id}: {'Blackjack!' if hand.is_blackjack else 'Win!'} Won {win_amount} chips."
+                        result_str = f"{player.username}{hand_id}: {'Blackjack!' if hand.is_natural_blackjack else 'Win!'} Won {win_amount} chips."
                 elif player_score < dealer_score:
-                    # Player loses
-                    result_str = f"{player.display_name}{hand_id}: Lost {hand.bet} chips to the dealer."
-                else: # Push
+                    result_str = f"{player.username}{hand_id}: Lost {hand.bet} chips to the dealer."
+                else:  # Push
                     token_manager.add_chips(player.user_id, hand.bet, source_id=token_manager.CASINO_POOL_ID)
-                    result_str = f"{player.display_name}{hand_id}: Push! Bet of {hand.bet} returned."
-                
+                    result_str = f"{player.username}{hand_id}: Push! Bet of {hand.bet} returned."
+
                 player_results.append(result_str)
-            
+
             if player_results:
                 results.append("\n".join(player_results))
 
@@ -359,6 +361,7 @@ class BlackjackCog(commands.Cog):
             return
 
         table.reset_round()
+        table.state = GameState.BETTING
         await self.update_lobby_embed(table)
         await ctx.send("New round! Betting is now open! Use `!bjbet <amount>` in this channel.")
 
@@ -387,9 +390,10 @@ class BlackjackCog(commands.Cog):
         token_manager.remove_chips(player.user_id, amount, destination_id=token_manager.CASINO_POOL_ID)
         await ctx.send(f"{ctx.author.display_name} has bet {amount} tokens.")
 
+        # If all players have bet, start the game automatically
         if all(p.has_bet for p in table.players):
-            await ctx.send("All players have bet! Starting game...")
-            await self.start_game_logic(ctx.guild, table)
+            await ctx.send("All players have now placed their bets! Starting the game...")
+            await self._start_game_logic(ctx.guild, table)
 
     @commands.command(name='create_table', aliases=['blackjack'])
     @commands.has_permissions(administrator=True)
@@ -462,17 +466,155 @@ class BlackjackCog(commands.Cog):
 
 
 
+    async def _start_game_logic(self, guild: discord.Guild, table: BlackjackTable):
+        """Deals cards, checks for blackjacks, and starts the game flow."""
+        table.state = GameState.PLAYING
+        await self.update_lobby_embed(table)
+
+        # Deal initial cards
+        for _ in range(2):
+            for player in table.players:
+                player.current_hand.cards.append(table.deck.deal())
+            table.dealer_cards.append(table.deck.deal())
+
+        # Check for natural blackjacks
+        for player in table.players:
+            if player.current_hand.hand_value() == 21:
+                player.current_hand.is_natural_blackjack = True
+                player.current_hand.is_finished = True
+
+        # Set current player and start the game flow
+        table.current_player_index = 0
+        await self._advance_game(guild, table)
+
     @commands.command(name='start_game')
     @commands.has_permissions(administrator=True)
     async def start_game(self, ctx, table_id: str):
+        """Manually starts a new round of blackjack with the current players and bets."""
         if table_id not in self.tables:
             await ctx.send(f"Table '{table_id}' not found!")
             return
         table = self.tables[table_id]
+
+        if table.state != GameState.BETTING:
+            await ctx.send("The game is not in a betting state. Use `!start_betting` first.")
+            return
+
+        if not all(p.has_bet for p in table.players):
+            await ctx.send("Not all players have placed their bets yet.")
+        await self._start_game_logic(ctx.guild, table)
+
+    @commands.command(name='create_table', aliases=['blackjack'])
+    @commands.has_permissions(administrator=True)
+    async def create_table(self, ctx, table_id: str = None):
+        
+        await asyncio.sleep(1)
+        await ctx.message.delete()
+
+        if table_id is None:
+            table_id = f"bj-{random.randint(1000, 9999)}"
+        if table_id in self.tables:
+            await ctx.send(f"Table '{table_id}' already exists!", delete_after=10)
+            return
+
+        guild = ctx.guild
+        lobby_channel = ctx.channel
+        category_name = "Blackjack Tables"
+        category = discord.utils.get(guild.categories, name=category_name)
+        if not category:
+            try:
+                category = await guild.create_category(category_name)
+            except discord.Forbidden:
+                return await ctx.send("I need permissions to create categories.", delete_after=10)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True)
+        }
+
+        try:
+            game_channel = await guild.create_text_channel(
+                f"bj-{table_id}",
+                category=category,
+                overwrites=overwrites
+            )
+        except discord.Forbidden:
+            return await ctx.send("I need permissions to create private channels.", delete_after=10)
+
+        table = BlackjackTable(
+            table_id=table_id,
+            guild_id=guild.id,
+            channel_id=ctx.channel.id,
+            game_channel_id=game_channel.id,
+            lobby_channel_id=lobby_channel.id
+        )
+        self.tables[table_id] = table
+
+        embed = self.create_lobby_embed(table)
+        view = LobbyView()
+        
+        try:
+            lobby_message = await lobby_channel.send(embed=embed, view=view)
+            table.lobby_message_id = lobby_message.id
+        except discord.Forbidden:
+            await game_channel.delete()
+            del self.tables[table_id]
+            return await ctx.send(f"I don't have permission to send messages in {lobby_channel.mention}.", delete_after=10)
+
+        await ctx.message.delete()
+        await game_channel.send(f"Welcome to Blackjack Table **{table_id}**! Please wait for the game to start.")
+
+    async def _get_table_from_context(self, ctx):
+        """Finds the table associated with the current channel."""
+        channel_id = ctx.channel.id
+        for table in self.tables.values():
+            if table.game_channel_id == channel_id:
+                return table
+        await ctx.send("This command can only be used in a blackjack game channel.")
+        return None
+
+
+
+    async def _start_game_logic(self, guild: discord.Guild, table: BlackjackTable):
+        """Deals cards, checks for blackjacks, and starts the game flow."""
+        table.state = GameState.PLAYING
+        await self.update_lobby_embed(table)
+
+        # Deal initial cards
+        for _ in range(2):
+            for player in table.players:
+                player.current_hand.cards.append(table.deck.deal())
+            table.dealer_cards.append(table.deck.deal())
+
+        # Check for natural blackjacks
+        for player in table.players:
+            if player.current_hand.hand_value() == 21:
+                player.current_hand.is_natural_blackjack = True
+                player.current_hand.is_finished = True
+
+        # Set current player and start the game flow
+        table.current_player_index = 0
+        await self._advance_game(guild, table)
+
+    @commands.command(name='start_game')
+    @commands.has_permissions(administrator=True)
+    async def start_game(self, ctx, table_id: str):
+        """Manually starts a new round of blackjack with the current players and bets."""
+        if table_id not in self.tables:
+            await ctx.send(f"Table '{table_id}' not found!")
+            return
+        table = self.tables[table_id]
+
+        if table.state != GameState.BETTING:
+            await ctx.send("The game is not in a betting state. Use `!start_betting` first.")
+            return
+
         if not all(p.has_bet for p in table.players):
             await ctx.send("Not all players have placed their bets yet.")
             return
-        await self.start_game_logic(ctx.guild, table)
+
+        await ctx.send("An admin has started the game!")
+        await self._start_game_logic(ctx.guild, table)
 
     @commands.command(name='close_table')
     @commands.has_permissions(administrator=True)
@@ -480,19 +622,48 @@ class BlackjackCog(commands.Cog):
         if table_id not in self.tables:
             await ctx.send(f"Table '{table_id}' not found!")
             return
+            
         table = self.tables[table_id]
+
+        # Update the lobby embed to show the table is closed
+        if table.lobby_channel_id and table.lobby_message_id:
+            try:
+                lobby_channel = ctx.guild.get_channel(table.lobby_channel_id)
+                if lobby_channel:
+                    lobby_message = await lobby_channel.fetch_message(table.lobby_message_id)
+                    closed_embed = discord.Embed(
+                        title=f"Blackjack Table: {table.table_id} (Closed)",
+                        description="This table has been closed by an administrator.",
+                        color=discord.Color.dark_red()
+                    )
+                    await lobby_message.edit(embed=closed_embed, view=None)
+            except (discord.NotFound, discord.Forbidden) as e:
+                print(f"Error updating lobby message for table {table_id}: {e}")
+
+        # Refund any outstanding bets
         for player in table.players:
             for hand in player.hands:
                 if hand.bet > 0:
-                    repayment_message = token_manager.add_chips(player.user_id, hand.bet, source_id=token_manager.CASINO_POOL_ID)
-                    if repayment_message:
-                        await ctx.send(repayment_message)
-        if table.game_channel_id:
-            game_channel = self.bot.get_channel(table.game_channel_id)
-            if game_channel:
+                    token_manager.add_chips(player.user_id, hand.bet, source_id=token_manager.CASINO_POOL_ID)
+                    try:
+                        member = ctx.guild.get_member(player.user_id)
+                        if member:
+                            await member.send(f"The blackjack table '{table_id}' was closed. Your bet of {hand.bet} has been refunded.")
+                    except discord.Forbidden:
+                        pass  # Can't send DMs
+            
+        # Delete the game channel
+        game_channel = ctx.guild.get_channel(table.game_channel_id)
+        if game_channel:
+            try:
                 await game_channel.delete()
+            except discord.Forbidden:
+                print(f"Failed to delete channel for table {table_id}")
+            
+        # Delete the table from memory
         del self.tables[table_id]
-        await ctx.send(f"Table {table_id} closed! All bets have been returned.")
+            
+        await ctx.send(f"Table '{table_id}' has been closed.", delete_after=10)
 
 class GameView(discord.ui.View):
     def __init__(self, cog: BlackjackCog, table: BlackjackTable):

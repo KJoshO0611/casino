@@ -194,3 +194,4 @@ cython_debug/
 .cursorindexingignore
 
 # Casino data
+data
