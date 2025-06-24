@@ -1,25 +1,122 @@
 import discord
 from discord.ext import commands
-from typing import Dict
+from typing import Dict, List, Optional
+from discord import Button, ButtonStyle
 
 from roulette import RouletteGame, BetType
 from token_manager import token_manager
+from roulette_components import BetTypeButton, BetAmountModal
+
+# Update this URL with your actual roulette table image
+ROULETTE_TABLE_URL = "https://i.imgur.com/JRAK4qR.png"
 
 class RouletteCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.games: Dict[int, RouletteGame] = {}
+        self.active_views: Dict[int, discord.ui.View] = {}
+        
+    async def create_betting_interface(self, channel_id: int):
+        """Creates and returns a view with betting buttons."""
+        view = discord.ui.View(timeout=300)  # 5 minute timeout
+        
+        # Group bet types into rows
+        bet_groups = [
+            [BetType.RED, BetType.BLACK, BetType.ODD, BetType.EVEN],
+            [BetType.LOW, BetType.HIGH, BetType.DOZEN_1, BetType.DOZEN_2, BetType.DOZEN_3],
+            [BetType.COLUMN_1, BetType.COLUMN_2, BetType.COLUMN_3, BetType.STRAIGHT_UP]
+        ]
+        
+        # Add buttons to the view
+        for row, bet_group in enumerate(bet_groups):
+            for bet_type in bet_group:
+                button = BetTypeButton(bet_type, row)
+                button.callback = self.bet_button_callback
+                view.add_item(button)
+        
+        return view
+        
+    async def bet_button_callback(self, interaction: discord.Interaction):
+        """Handles bet button clicks."""
+        # Get the custom ID and extract bet type
+        custom_id = interaction.data["custom_id"]
+        bet_type_name = custom_id[4:]  # Remove 'bet_' prefix
+        
+        try:
+            bet_type = BetType[bet_type_name]
+        except KeyError:
+            await interaction.response.send_message("Invalid bet type.", ephemeral=True)
+            return
+        
+        # Check if user has enough chips
+        user_chips = token_manager.get_chips(interaction.user.id)
+        if user_chips <= 0:
+            await interaction.response.send_message("You don't have any chips to bet!", ephemeral=True)
+            return
+            
+        # Create and send the bet amount modal
+        modal = BetAmountModal(bet_type, user_chips)
+        modal.place_bet = self.place_bet_from_modal
+        await interaction.response.send_modal(modal)
+    
+    async def place_bet_from_modal(self, interaction: discord.Interaction, amount: int, number: Optional[int] = None):
+        """Handles the bet placement from the modal."""
+        channel_id = interaction.channel_id
+        if channel_id not in self.games:
+            await interaction.response.send_message("No active roulette game in this channel.", ephemeral=True)
+            return
+            
+        user_id = interaction.user.id
+        game = self.games[channel_id]
+        
+        # Get bet type from the button that was clicked
+        # This is a bit tricky since we don't have direct access to the button that triggered the modal
+        # So we'll use the bet_type that was passed to the modal
+        bet_type = self.bet_type
+        
+        if number is not None:
+            bet_value = number
+            bet_type_str = f"{bet_type.value.lower()} on {number}"
+        else:
+            bet_value = None
+            bet_type_str = bet_type.value.lower()
+        
+        token_manager.add_chips(user_id, -amount)
+        game.place_bet(user_id, bet_type, bet_value, amount)
+        
+        await interaction.response.send_message(
+            f"{interaction.user.mention} placed a bet of {amount} chips on {bet_type_str}.",
+            ephemeral=False
+        )
 
     @commands.command(name='roulette')
     async def start_roulette(self, ctx):
-        """Starts a new roulette game in the channel."""
+        """Starts a new roulette game in the channel with an interactive interface."""
         channel_id = ctx.channel.id
         if channel_id in self.games:
             await ctx.send("A roulette game is already in progress in this channel.")
             return
         
+        # Create new game
         self.games[channel_id] = RouletteGame()
-        await ctx.send("**New Roulette Game Started!**\nPlace your bets with `!rbet <amount> <bet_type> [number]`\nExample: `!rbet 100 red` or `!rbet 10 straight_up 23`\nType `!bet_types` for all options. Once all bets are in, an admin can `!spin` the wheel!")
+        
+        # Create embed with instructions and table image
+        embed = discord.Embed(
+            title="🎰 Roulette Game Started! 🎰",
+            description="Place your bets using the buttons below.\nClick on a bet type to place your bet.",
+            color=0x00ff00
+        )
+        embed.set_image(url=ROULETTE_TABLE_URL)
+        
+        # Create and send the betting interface
+        view = await self.create_betting_interface(channel_id)
+        self.active_views[channel_id] = view
+        
+        await ctx.send(embed=embed, view=view)
+        await ctx.send("🎲 **Betting is open!** Use the buttons above to place your bets. 🎲")
+        
+        # Store the view to prevent it from being garbage collected
+        self.bot.add_view(view)
 
     @commands.command(name='bet_types')
     async def list_bet_types(self, ctx):
@@ -77,14 +174,38 @@ class RouletteCog(commands.Cog):
         game = self.games[channel_id]
         if not game.players_bets:
             await ctx.send("No bets have been placed. The wheel spins for nothing.")
+            # Clean up the view
+            if channel_id in self.active_views:
+                self.active_views[channel_id].stop()
+                del self.active_views[channel_id]
             del self.games[channel_id]
             return
         
+        # Disable all buttons
+        if channel_id in self.active_views:
+            for item in self.active_views[channel_id].children:
+                item.disabled = True
+            
+            # Edit the original message to disable the buttons
+            try:
+                messages = [msg async for msg in ctx.channel.history(limit=10)]
+                for msg in messages:
+                    if msg.components:
+                        await msg.edit(view=self.active_views[channel_id])
+                        break
+            except Exception as e:
+                print(f"Error disabling buttons: {e}")
+            
+            # Clean up the view
+            self.active_views[channel_id].stop()
+            del self.active_views[channel_id]
+        
+        # Spin the wheel and get results
         winnings, winning_number, winning_color = game.resolve_bets()
 
-        color_emoji = ":red_circle:" if winning_color == 'red' else ":black_circle:"
-        if winning_color == 'green':
-            color_emoji = ":green_circle:"
+        color_emoji = "🔴" if winning_color == 'red' else "⚫"
+        if winning_number == 0:
+            color_emoji = "🟢"
 
         result_embed = discord.Embed(
             title="The Wheel has Spun!",
@@ -111,5 +232,10 @@ class RouletteCog(commands.Cog):
 
         del self.games[channel_id]
 
-async def setup(bot):
-    await bot.add_cog(RouletteCog(bot))
+    def cog_unload(self):
+        """Clean up views when the cog is unloaded."""
+        for view in self.active_views.values():
+            view.stop()
+
+def setup(bot):
+    bot.add_cog(RouletteCog(bot))
