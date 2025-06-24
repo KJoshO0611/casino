@@ -1,105 +1,105 @@
 import discord
+import uuid
 from discord.ext import commands
-from poker import PokerTable, GameState
+from poker import PokerTable, GameState, HandEvaluator
 from token_manager import token_manager
-from typing import Optional
+from typing import Optional, Dict
 
 class PokerLobbyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     def _find_table_by_interaction(self, cog: "PokerCog", interaction: discord.Interaction) -> Optional[PokerTable]:
-        for table in cog.tables.values():
-            if table.lobby_message_id == interaction.message.id:
-                return table
-        return None
+        if not interaction.message.embeds:
+            return None
+        embed = interaction.message.embeds[0]
+        if not embed.footer or "Table ID:" not in embed.footer.text:
+            return None
+        
+        try:
+            footer_parts = embed.footer.text.split('|')
+            table_id_part = footer_parts[0].strip()
+            table_id = table_id_part.replace("Table ID:", "").strip()
+            return cog.tables.get(table_id)
+        except (IndexError, ValueError):
+            return None
 
     async def _update_lobby_message(self, cog: "PokerCog", interaction: discord.Interaction, table: PokerTable):
         lobby_channel = interaction.guild.get_channel(table.lobby_channel_id)
-        if not lobby_channel:
-            return
+        if lobby_channel:
+            try:
+                message = await lobby_channel.fetch_message(table.lobby_message_id)
+                embed = cog.create_lobby_embed(table)
+                await message.edit(embed=embed)
+            except (discord.NotFound, discord.Forbidden):
+                pass
 
-        try:
-            message = await lobby_channel.fetch_message(table.lobby_message_id)
-            embed = cog.create_lobby_embed(table)
-            await message.edit(embed=embed)
-        except (discord.NotFound, discord.Forbidden) as e:
-            print(f"Failed to update lobby message for table: {e}")
-
-    @discord.ui.button(label="Join", style=discord.ButtonStyle.green, custom_id="poker_join_persistent")
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.green, custom_id="poker_join")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        cog: PokerCog = interaction.client.get_cog("PokerCog")
+        cog = interaction.client.get_cog("PokerCog")
         if not cog:
-            await interaction.followup.send("The poker game is currently unavailable.", ephemeral=True)
+            await interaction.response.send_message("Poker cog not loaded.", ephemeral=True)
             return
 
         table = self._find_table_by_interaction(cog, interaction)
         if not table:
-            await interaction.followup.send("This table seems to be closed.", ephemeral=True)
+            await interaction.response.send_message("This poker table is no longer available.", ephemeral=True)
             return
 
-        if table.game_active:
-            await interaction.followup.send("You can't join a game that has already started.", ephemeral=True)
+        if table.state != GameState.WAITING:
+            await interaction.response.send_message("You can't join a game that has already started.", ephemeral=True)
             return
 
-        user_id = interaction.user.id
-        username = interaction.user.display_name
-        chips = token_manager.get_chips(user_id)
-
-        if chips <= 0:
-            await interaction.followup.send("You have no chips to join the game with!", ephemeral=True)
+        chips = token_manager.get_chips(interaction.user.id)
+        if chips < table.big_blind * 50: # Example: require 50 big blinds to join
+            await interaction.response.send_message("You don't have enough chips to join this table.", ephemeral=True)
             return
 
-        if table.add_player(user_id, username, chips):
-            # Grant access to the private channel
+        if table.add_player(interaction.user.id, interaction.user.name, chips):
             private_channel = interaction.guild.get_channel(table.private_channel_id)
             if private_channel:
-                await private_channel.set_permissions(interaction.user, read_messages=True)
-            
+                await private_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
+            await interaction.response.send_message(f"{interaction.user.name} has joined table `{table.table_id}`.", ephemeral=False)
             await self._update_lobby_message(cog, interaction, table)
-            await interaction.followup.send(f"You have joined the game with {chips} chips.", ephemeral=True)
         else:
-            await interaction.followup.send("You have already joined the game or the table is full.", ephemeral=True)
+            await interaction.response.send_message("You are already at the table or the table is full.", ephemeral=True)
 
-    @discord.ui.button(label="Leave", style=discord.ButtonStyle.red, custom_id="poker_leave_persistent")
+    @discord.ui.button(label="Leave", style=discord.ButtonStyle.red, custom_id="poker_leave")
     async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        cog: PokerCog = interaction.client.get_cog("PokerCog")
+        cog = interaction.client.get_cog("PokerCog")
         if not cog:
-            await interaction.followup.send("The poker game is currently unavailable.", ephemeral=True)
+            await interaction.response.send_message("Poker cog not loaded.", ephemeral=True)
             return
 
         table = self._find_table_by_interaction(cog, interaction)
         if not table:
-            await interaction.followup.send("This table seems to be closed.", ephemeral=True)
+            await interaction.response.send_message("This poker table is no longer available.", ephemeral=True)
             return
 
-        player = table.get_player(interaction.user.id)
-        if player:
-            # Revoke access to the private channel
+        if table.state != GameState.WAITING:
+            await interaction.response.send_message("You can't leave a game that has already started.", ephemeral=True)
+            return
+
+        if table.remove_player(interaction.user.id):
             private_channel = interaction.guild.get_channel(table.private_channel_id)
             if private_channel:
                 await private_channel.set_permissions(interaction.user, overwrite=None)
-
-            token_manager.set_chips(player.user_id, player.chips)
-            table.remove_player(interaction.user.id)
+            await interaction.response.send_message(f"{interaction.user.name} has left table `{table.table_id}`.", ephemeral=False)
             await self._update_lobby_message(cog, interaction, table)
-            await interaction.followup.send(f"You have left the game. Your final chip count is {player.chips}.", ephemeral=True)
         else:
-            await interaction.followup.send("You are not in this game.", ephemeral=True)
+            await interaction.response.send_message("You are not at this table.", ephemeral=True)
 
 class PokerCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.tables = {}  # Maps original_channel_id -> PokerTable instance
+        self.tables: Dict[str, PokerTable] = {}
         self.lobby_view = PokerLobbyView()
 
     def cog_load(self):
         self.bot.add_view(self.lobby_view)
 
-    def _get_table_by_lobby(self, channel_id: int) -> Optional[PokerTable]:
-        return self.tables.get(channel_id)
+    def _get_table_by_id(self, table_id: str) -> Optional[PokerTable]:
+        return self.tables.get(table_id)
 
     def _get_table_by_game_channel(self, channel_id: int) -> Optional[PokerTable]:
         for table in self.tables.values():
@@ -108,85 +108,54 @@ class PokerCog(commands.Cog):
         return None
 
     def create_lobby_embed(self, table: PokerTable) -> discord.Embed:
-        embed = discord.Embed(title="Poker Table", description=f"Game will be played in <#{table.private_channel_id}>", color=discord.Color.blue())
+        embed = discord.Embed(title="Poker Table", description=f"A new poker table is open for players!", color=discord.Color.blue())
+        embed.add_field(name="Game Channel", value=f"<#{table.private_channel_id}>", inline=False)
         player_list = "\n".join([p.username for p in table.players]) if table.players else "No players yet."
         embed.add_field(name=f"Players ({len(table.players)}/{table.max_players})", value=player_list, inline=False)
-        embed.set_footer(text=f"Game State: {table.state.value.upper()}")
+        embed.set_footer(text=f"Table ID: {table.table_id} | Game State: {table.state.value.upper()}")
         return embed
 
     async def update_lobby_message(self, table: PokerTable):
         lobby_channel = self.bot.get_channel(table.lobby_channel_id)
-        if not lobby_channel:
-            return
-
-        try:
-            message = await lobby_channel.fetch_message(table.lobby_message_id)
-            embed = self.create_lobby_embed(table)
-            await message.edit(embed=embed)
-        except (discord.NotFound, discord.Forbidden) as e:
-            print(f"Failed to update lobby message for table {table.original_channel_id}: {e}")
+        if lobby_channel:
+            try:
+                message = await lobby_channel.fetch_message(table.lobby_message_id)
+                embed = self.create_lobby_embed(table)
+                await message.edit(embed=embed)
+            except (discord.NotFound, discord.Forbidden):
+                pass
 
     async def send_private_hands(self, table: PokerTable):
         for player in table.players:
-            if not player.folded:
-                try:
-                    user = await self.bot.fetch_user(player.user_id)
-                    hand_str = ' '.join(map(str, player.cards))
-                    embed = discord.Embed(title="Your Hand", description=hand_str, color=discord.Color.green())
-                    await user.send(embed=embed)
-                except (discord.Forbidden, discord.NotFound):
-                    private_channel = self.bot.get_channel(table.private_channel_id)
-                    await private_channel.send(f"Could not send hand to {player.username}. Please check your DMs are open.")
+            user = self.bot.get_user(player.user_id)
+            if user:
+                hand_str = ", ".join(map(str, player.cards))
+                await user.send(f"Your hand for Table `{table.table_id}`: {hand_str}")
 
     async def send_game_state(self, table: PokerTable, channel: discord.TextChannel):
         game_state = table.get_game_state()
-        embed = discord.Embed(title="Poker Game State", color=discord.Color.blue())
+        embed = discord.Embed(title=f"Poker Game State - Table {table.table_id}", color=discord.Color.dark_green())
         
-        # Add recent game events to the embed description
-        if game_state['events']:
-            embed.description = "\n".join(game_state['events'])
-
-        community_cards_str = ' '.join(game_state['community_cards']) if game_state['community_cards'] else "Not dealt yet."
-        embed.add_field(name="Community Cards", value=community_cards_str, inline=False)
+        community_cards = " ".join(map(str, game_state['community_cards'])) or "Not dealt yet."
+        embed.add_field(name="Community Cards", value=community_cards, inline=False)
+        embed.add_field(name="Pot", value=str(game_state['pot']), inline=True)
+        embed.add_field(name="Current Bet", value=str(game_state['current_bet']), inline=True)
         
-        embed.add_field(name="Pot", value=str(game_state['pot']))
-        embed.add_field(name="Current Bet", value=str(game_state['current_bet']))
-
         player_statuses = []
-        num_players = len(game_state['players'])
-        if num_players > 0:
-            dealer_pos = game_state['dealer_position']
-            sb_pos = (dealer_pos + 1) % num_players
-            bb_pos = (dealer_pos + 2) % num_players
-            if num_players == 2:
-                sb_pos = dealer_pos
-                bb_pos = (dealer_pos + 1) % num_players
+        for p_state in game_state['players']:
+            status_icon = "\n- "
+            if p_state['is_dealer']: status_icon = "(D) "
+            if p_state['is_sb']: status_icon = "(SB) "
+            if p_state['is_bb']: status_icon = "(BB) "
 
-            for i, player in enumerate(game_state['players']):
-                status = ""
-                # At the end of the hand, show cards and hand rank for players who didn't fold
-                if game_state['state'] == 'ended' and not player['folded']:
-                    cards_str = ' '.join(player['cards'])
-                    hand_name_str = f" - {player['hand_name']}" if player['hand_name'] else ""
-                    status += f" ({cards_str}{hand_name_str})"
-
-                if player['folded']:
-                    status += " (Folded)"
-                elif player['all_in']:
-                    status += " (All-in)"
-                
-                if i == dealer_pos:
-                    status += " (D)"
-                if i == sb_pos:
-                    status += " (SB)"
-                if i == bb_pos:
-                    status += " (BB)"
-
-                player_line = f"{player['username']}: {player['chips']} chips"
-                if player['current_bet'] > 0:
-                    player_line += f" (Bet: {player['current_bet']})"
-                player_line += status
-                player_statuses.append(player_line)
+            player_info = f"{status_icon}{p_state['username']}: {p_state['chips']} chips"
+            if p_state['folded']:
+                player_info += " (Folded)"
+            if p_state['is_all_in']:
+                player_info += " (All-in)"
+            if p_state['current_bet'] > 0:
+                player_info += f" - Bet: {p_state['current_bet']}"
+            player_statuses.append(player_info)
 
         if not player_statuses:
             player_statuses.append("No players at the table.")
@@ -196,80 +165,87 @@ class PokerCog(commands.Cog):
         if game_state['game_active']:
             current_player = next((p for p in game_state['players'] if p['is_current_turn']), None)
             if current_player:
-                embed.set_footer(text=f"It's {current_player['username']}'s turn to act.")
+                embed.set_footer(text=f"Current turn: {current_player['username']}")
+        else:
+            embed.set_footer(text="Game is not active.")
 
         await channel.send(embed=embed)
 
     @commands.command(name='poker')
     async def create_poker_table(self, ctx):
-        if ctx.channel.id in self.tables:
-            await ctx.send("A poker table already exists for this channel.")
-            return
+        table_id = str(uuid.uuid4())[:6]
         category_name = "Poker Tables"
         category = discord.utils.get(ctx.guild.categories, name=category_name)
         if category is None:
             category = await ctx.guild.create_category(category_name)
+        
         overwrites = {
             ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
             ctx.guild.me: discord.PermissionOverwrite(read_messages=True)
         }
+        
         private_channel = await ctx.guild.create_text_channel(
-            f"poker-game-{ctx.channel.name}", 
+            f"poker-table-{table_id}", 
             overwrites=overwrites, 
             category=category
         )
-        table = PokerTable(ctx.channel.id, private_channel.id)
-        table.lobby_channel_id = ctx.channel.id
-        self.tables[ctx.channel.id] = table
+        
+        table = PokerTable(table_id, ctx.channel.id, private_channel.id)
+        self.tables[table.table_id] = table
+        
         embed = self.create_lobby_embed(table)
         lobby_message = await ctx.send(embed=embed, view=self.lobby_view)
         table.lobby_message_id = lobby_message.id
 
     @commands.command(name='start')
-    async def start_game(self, ctx):
-        table = self._get_table_by_lobby(ctx.channel.id)
-        if not table:
+    async def start_game(self, ctx, table_id: Optional[str] = None):
+        table = None
+        if table_id:
+            table = self._get_table_by_id(table_id)
+        else:
             table = self._get_table_by_game_channel(ctx.channel.id)
 
         if not table:
-            await ctx.send("No poker table found for this channel. Use `!poker` to create one or use the command in the lobby/game channel.")
+            if not table_id:
+                await ctx.send("You are in the lobby. Please provide a Table ID to start a game, e.g., `!start <table_id>`.")
+            else:
+                await ctx.send(f"No poker table found with ID `{table_id}`.")
             return
         
         success, message = table.start_game()
         if success:
             private_channel = self.bot.get_channel(table.private_channel_id)
-            # Send confirmation in the channel where the command was used
-            await ctx.send(f"Game started! Check the private poker channel: {private_channel.mention} and your DMs for your cards.")
+            await ctx.send(f"Game at Table `{table.table_id}` started! Check {private_channel.mention} and your DMs for your cards.")
             
-            # Also send a message in the lobby channel if it's different
-            if ctx.channel.id != table.lobby_channel_id:
-                lobby_channel = self.bot.get_channel(table.lobby_channel_id)
-                if lobby_channel:
-                    await lobby_channel.send(f"The game has started! See {private_channel.mention}.")
-
             await self.update_lobby_message(table)
             await self.send_private_hands(table)
             await self.send_game_state(table, private_channel)
         else:
-            await ctx.send(message)
+            await ctx.send(f"Could not start game at Table `{table.table_id}`: {message}")
 
     @commands.command(name='close')
     @commands.has_permissions(manage_channels=True)
-    async def close_table(self, ctx):
-        """Closes the poker table and deletes its private channel."""
-        table = self._get_table_by_lobby(ctx.channel.id)
+    async def close_table(self, ctx, table_id: Optional[str] = None):
+        """Closes a specific poker table and deletes its private channel."""
+        table = None
+        if table_id:
+            table = self._get_table_by_id(table_id)
+        else:
+            table = self._get_table_by_game_channel(ctx.channel.id)
+
         if not table:
-            await ctx.send("No poker table found for this channel to close.")
+            if not table_id:
+                await ctx.send("Please provide a Table ID to close, e.g., `!close <table_id>`.")
+            else:
+                await ctx.send(f"No poker table found with ID `{table_id}`.")
             return
 
         # Delete the private channel
         private_channel = self.bot.get_channel(table.private_channel_id)
         if private_channel:
             try:
-                await private_channel.delete(reason=f"Poker table closed by {ctx.author}.")
-            except discord.Forbidden:
-                await ctx.send("I don't have permissions to delete the channel.")
-            except discord.HTTPException as e:
+                await private_channel.delete(reason=f"Poker table {table.table_id} closed by {ctx.author}.")
+            except (discord.Forbidden, discord.HTTPException) as e:
                 await ctx.send(f"Failed to delete channel: {e}")
 
         # Delete the lobby message
@@ -279,47 +255,93 @@ class PokerCog(commands.Cog):
                 lobby_message = await lobby_channel.fetch_message(table.lobby_message_id)
                 await lobby_message.delete()
             except (discord.NotFound, discord.Forbidden):
-                pass  # Message already gone or can't delete
+                pass
 
         # Remove the table from tracking
-        if table.lobby_channel_id in self.tables:
-            del self.tables[table.lobby_channel_id]
+        if table.table_id in self.tables:
+            del self.tables[table.table_id]
 
-        await ctx.send("Poker table has been closed.")
+        await ctx.send(f"Poker table `{table.table_id}` has been closed.")
 
     @commands.command(name='call')
     async def call_action(self, ctx):
-        await self.handle_player_action(ctx, "call")
+        table = self._get_table_by_game_channel(ctx.channel.id)
+        if table and table.game_active:
+            message = table.player_action(ctx.author.id, 'call')
+            await ctx.send(message)
+            await self.check_round_end(table)
 
     @commands.command(name='raise')
     async def raise_action(self, ctx, amount: int):
-        await self.handle_player_action(ctx, "raise", amount)
+        table = self._get_table_by_game_channel(ctx.channel.id)
+        if table and table.game_active:
+            message = table.player_action(ctx.author.id, 'raise', amount)
+            await ctx.send(message)
+            await self.check_round_end(table)
 
     @commands.command(name='fold')
     async def fold_action(self, ctx):
-        await self.handle_player_action(ctx, "fold")
+        table = self._get_table_by_game_channel(ctx.channel.id)
+        if table and table.game_active:
+            message = table.player_action(ctx.author.id, 'fold')
+            await ctx.send(message)
+            await self.check_round_end(table)
 
     @commands.command(name='check')
     async def check_action(self, ctx):
-        await self.handle_player_action(ctx, "check")
-
-    async def handle_player_action(self, ctx, action: str, amount: int = 0):
         table = self._get_table_by_game_channel(ctx.channel.id)
-        if not table:
-            await ctx.send("This command can only be used in a private poker game channel.", ephemeral=True)
-            return
+        if table and table.game_active:
+            message = table.player_action(ctx.author.id, 'check')
+            await ctx.send(message)
+            await self.check_round_end(table)
 
-        success, message = table.player_action(ctx.author.id, action, amount)
-        private_channel = self.bot.get_channel(table.private_channel_id)
-        if success:
-            await self.send_game_state(table, private_channel)
-            # If the hand is over, save everyone's chips
-            if table.state == GameState.ENDED:
-                for player in table.players:
-                    token_manager.set_chips(player.user_id, player.chips)
-                await private_channel.send("All player chip counts have been saved.")
-        else:
-            await ctx.send(message, ephemeral=True)
+    @commands.command(name='allin')
+    async def allin_action(self, ctx):
+        table = self._get_table_by_game_channel(ctx.channel.id)
+        if table and table.game_active:
+            message = table.player_action(ctx.author.id, 'allin')
+            await ctx.send(message)
+            await self.check_round_end(table)
+
+    async def check_round_end(self, table: PokerTable):
+        if table.state in [GameState.PREFLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
+            if table._is_betting_over():
+                table._advance_state()
+                private_channel = self.bot.get_channel(table.private_channel_id)
+                if private_channel:
+                    await self.send_game_state(table, private_channel)
+                    if table.state == GameState.SHOWDOWN:
+                        await self.handle_showdown(table, private_channel)
+
+    async def handle_showdown(self, table: PokerTable, channel: discord.TextChannel):
+        embed = discord.Embed(title="Showdown Results", color=discord.Color.gold())
+
+        # Display hands from showdown_hands
+        if table.showdown_hands:
+            showdown_text = []
+            for player, hand_rank, tiebreakers, all_cards in table.showdown_hands:
+                if not player.folded:
+                    hand_name = HandEvaluator.get_hand_name(hand_rank)
+                    best_hand_cards = HandEvaluator.get_best_hand(all_cards)
+                    hand_str = ' '.join(map(str, best_hand_cards))
+                    showdown_text.append(f"{player.username}: {hand_name} (`{hand_str}`)")
+            if showdown_text:
+                embed.add_field(name="Hands", value="\n".join(showdown_text), inline=False)
+
+        # Display game events for pot distribution
+        if table.game_events:
+            embed.add_field(name="Winnings", value="\n".join(table.game_events), inline=False)
+
+        await channel.send(embed=embed)
+
+        # Transfer rake to the casino pool
+        if table.house_rake > 0:
+            token_manager.add_chips(token_manager.CASINO_POOL_ID, table.house_rake)
+            await channel.send(f"The house collected a rake of {table.house_rake} chips.")
+
+        # The game state is now ENDED. A new game can be started.
+        # Update the lobby to reflect the table is available again or concluded.
+        await self.update_lobby_message(table)
 
 async def setup(bot):
     await bot.add_cog(PokerCog(bot))

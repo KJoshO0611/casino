@@ -75,6 +75,8 @@ class RouletteCog(commands.Cog):
         if numbers:
             bet_type_str += f" on {', '.join(map(str, numbers))}"
 
+        # Move chips to the casino pool before placing the bet
+        token_manager.remove_chips(user_id, amount, destination_id=token_manager.CASINO_POOL_ID)
         game.place_bet(user_id, bet_type, bet_value, amount)
 
         await interaction.response.send_message(
@@ -180,6 +182,8 @@ class RouletteCog(commands.Cog):
         elif bet_type == BetType.FIRST_FOUR:
             value_to_bet = [0, 1, 2, 3]
         
+        # Move chips to the casino pool before placing the bet
+        token_manager.remove_chips(user_id, amount, destination_id=token_manager.CASINO_POOL_ID)
         game.place_bet(user_id, bet_type, value_to_bet, amount)
         await ctx.send(f"{ctx.author.display_name} has placed a bet of {amount} chips on `{bet_type.value}{bet_display_value}`.")
 
@@ -222,7 +226,7 @@ class RouletteCog(commands.Cog):
             del self.active_views[channel_id]
         
         # Spin the wheel and get results
-        winnings, winning_number, winning_color = game.resolve_bets()
+        payouts, winning_number, winning_color = game.resolve_bets()
 
         color_emoji = "🔴" if winning_color == 'red' else "⚫"
         if winning_number == 0:
@@ -235,15 +239,27 @@ class RouletteCog(commands.Cog):
         )
 
         winners_str = ""
-        for user_id, amount_won in winnings.items():
+        pool_balance = token_manager.get_pool_balance()
+        max_win_per_spin = int(pool_balance * 0.15) # Cap at 15% of the pool
+
+        for user_id, amount_won in payouts.items():
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-            repayment_message = token_manager.add_chips(user_id, amount_won)
+            
+            original_win = amount_won
+            capped = False
+            if amount_won > max_win_per_spin:
+                amount_won = max_win_per_spin
+                capped = True
+
+            # Pay out winnings from the casino pool. `amount_won` from `resolve_bets` already includes the original bet.
+            repayment_message = token_manager.add_chips(user_id, amount_won, source_id=token_manager.CASINO_POOL_ID)
             if repayment_message:
                 await ctx.send(repayment_message)
-            if amount_won > 0:
-                winners_str += f"{user.mention} won **{amount_won}** chips!\n"
-            else:
-                 winners_str += f"{user.mention} lost **{-amount_won}** chips.\n"
+            
+            win_message = f"{user.mention} won **{amount_won:,}** chips!\n"
+            if capped:
+                win_message += f"*(Your winnings of {original_win:,} were capped to {amount_won:,} to ensure casino stability.)*\n"
+            winners_str += win_message
 
         if not winners_str:
             winners_str = "No winners this round. The house wins!"

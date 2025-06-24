@@ -23,29 +23,44 @@ class SlotsCog(commands.Cog):
             await ctx.send("You don't have enough chips to play.")
             return
 
-        token_manager.add_chips(user_id, -amount)
+        token_manager.remove_chips(user_id, amount, destination_id=token_manager.CASINO_POOL_ID)
 
-        reels_message = await ctx.send(f"**{ctx.author.display_name} bets {amount} chips and pulls the lever...**\n\n[ 🎰 | 🎰 | 🎰 ]")
+        reels_message = await ctx.send(f"**{ctx.author.display_name} bets {amount:,} chips and pulls the lever...**\n\n[ 🎰 | 🎰 | 🎰 ]")
         await asyncio.sleep(1)
 
-        result = self.machine.pull_lever()
-        await reels_message.edit(content=f"**{ctx.author.display_name} bets {amount} chips and pulls the lever...**\n\n[ {result[0]} | 🎰 | 🎰 ]")
+        result = self.machine.pull_lever(user_id) # Pass player ID for pity system
+        await reels_message.edit(content=f"**{ctx.author.display_name} bets {amount:,} chips and pulls the lever...**\n\n[ {result[0]} | 🎰 | 🎰 ]")
         await asyncio.sleep(1)
 
-        await reels_message.edit(content=f"**{ctx.author.display_name} bets {amount} chips and pulls the lever...**\n\n[ {result[0]} | {result[1]} | 🎰 ]")
+        await reels_message.edit(content=f"**{ctx.author.display_name} bets {amount:,} chips and pulls the lever...**\n\n[ {result[0]} | {result[1]} | 🎰 ]")
         await asyncio.sleep(1)
 
-        await reels_message.edit(content=f"**{ctx.author.display_name} bets {amount} chips and pulls the lever...**\n\n[ {result[0]} | {result[1]} | {result[2]} ]")
+        await reels_message.edit(content=f"**{ctx.author.display_name} bets {amount:,} chips and pulls the lever...**\n\n[ {result[0]} | {result[1]} | {result[2]} ]")
 
-        winnings = self.machine.calculate_winnings(result, amount)
+        winnings = self.machine.calculate_winnings(user_id, result, amount)
 
         if winnings > 0:
-            repayment_message = token_manager.add_chips(user_id, winnings + amount) # Return original bet + winnings
+            # Check against casino pool to prevent bankruptcy
+            pool_balance = token_manager.get_pool_balance()
+            max_win = int(pool_balance * 0.10) # Cap winnings at 10% of the pool
+            
+            capped = False
+            if winnings > max_win:
+                winnings = max_win
+                capped = True
+
+            # The 'winnings' is the total prize. The bet was already removed.
+            repayment_message = token_manager.add_chips(user_id, winnings, source_id=token_manager.CASINO_POOL_ID)
             if repayment_message:
                 await ctx.send(repayment_message)
-            await ctx.send(f"🎉 **Congratulations!** You won **{winnings}** chips! 🎉")
+            
+            win_message = f"🎉 **Congratulations!** You won **{winnings:,}** chips! 🎉"
+            if capped:
+                win_message += f"\n*(Your winnings were capped to 10% of the casino's pool to ensure economic stability.)*"
+            await ctx.send(win_message)
         else:
-            await ctx.send("Sorry, not a winning spin. Better luck next time!")
+            pity_level = self.machine.pity_counters.get(user_id, 0)
+            await ctx.send(f"Sorry, not a winning spin. Better luck next time! (Pity level: {pity_level})")
 
     @play_slots.error
     async def play_slots_error(self, ctx, error):

@@ -179,11 +179,13 @@ class HandEvaluator:
         return best_hand
 
 class PokerTable:
-    def __init__(self, original_channel_id: int, private_channel_id: int, small_blind: int = 10, big_blind: int = 20):
-        self.original_channel_id = original_channel_id
+    def __init__(self, table_id: str, lobby_channel_id: int, private_channel_id: int, small_blind: int = 10, big_blind: int = 20, max_players: int = 8):
+        self.table_id = table_id
+        self.lobby_channel_id = lobby_channel_id
         self.private_channel_id = private_channel_id
         self.small_blind = small_blind
         self.big_blind = big_blind
+        self.max_players = max_players
         self.players: List[Player] = []
         self.deck = Deck()
         self.community_cards: List[Card] = []
@@ -196,9 +198,10 @@ class PokerTable:
         self.showdown_hands: List = []
         self.pot = 0
         self.current_bet = 0
+        self.house_rake = 0
 
     def add_player(self, user_id: int, username: str, chips: int) -> bool:
-        if self.game_active or len(self.players) >= 9:
+        if self.game_active or len(self.players) >= self.max_players:
             return False
         if any(p.user_id == user_id for p in self.players):
             return False
@@ -257,6 +260,7 @@ class PokerTable:
         self.showdown_hands = []
         self.last_raiser = None
         self.game_events = ["--- New Hand Starting ---"]
+        self.house_rake = 0 # Reset rake for the new hand
 
         for player in self.players:
             player.cards = [self.deck.deal(), self.deck.deal()]
@@ -448,7 +452,7 @@ class PokerTable:
         if len(active_players) == 1:
             winner = active_players[0]
             self.game_events.append(f"--- Hand Over ---")
-            self.game_events.append(f"{winner.username} wins the pot of {self.pot} as the last remaining player.")
+            self.game_events.append(f"{winner.username} wins the pot of {self.pot}.")
             winner.chips += self.pot
             self.pot = 0
             self.game_active = False
@@ -572,106 +576,13 @@ class PokerTable:
                 for winner in winners:
                     winner.chips += winnings
                     self.game_events.append(f"{winner.username} wins {winnings} from a pot of {side_pot}.")
-                # Give remainder to the first winner
+                # Any remainder from a split pot goes to the house rake
                 remainder = side_pot % len(winners)
                 if remainder > 0:
-                    winners[0].chips += remainder
+                    self.house_rake += remainder
 
             # Remove players who have no more bets in the pot
             pot_contributors = [p for p in pot_contributors if p.total_bet > 0]
-
-
-
-    def get_game_state(self):
-        player_states = []
-        for i, p in enumerate(self.players):
-            hand_name = HandEvaluator.get_hand_name(p.hand_rank) if p.hand_rank is not None else None
-            player_states.append({
-                "username": p.username,
-                "chips": p.chips,
-                "folded": p.folded,
-                "all_in": p.all_in,
-                "current_bet": p.current_bet,
-                "cards": [str(c) for c in p.cards],
-                "is_dealer": i == self.dealer_position,
-                "is_current_turn": i == self.current_player_index and self.game_active,
-                "hand_name": hand_name
-            })
-
-        return {
-            "game_active": self.game_active,
-            "state": self.state.value,
-            "pot": self.pot,
-            "current_bet": self.current_bet,
-            "community_cards": [str(c) for c in self.community_cards],
-            "players": player_states,
-            "dealer_position": self.dealer_position,
-            "events": self.game_events[-10:]
-        }
-        
-        # Reset current bets and acted status
-        for player in self.players:
-            player.current_bet = 0
-            player.acted = False
-        
-        self.current_bet = 0
-        
-        # Check if all remaining players are all-in (except possibly one)
-        players_with_chips = [p for p in active_players if p.chips > 0]
-        all_in_situation = len(players_with_chips) <= 1
-        
-        if self.state == GameState.PREFLOP:
-            # Deal flop
-            self.deck.deal()  # Burn card
-            for _ in range(3):
-                self.community_cards.append(self.deck.deal())
-            self.state = GameState.FLOP
-        
-        elif self.state == GameState.FLOP:
-            # Deal turn
-            self.deck.deal()  # Burn card
-            self.community_cards.append(self.deck.deal())
-            self.state = GameState.TURN
-        
-        elif self.state == GameState.TURN:
-            # Deal river
-            self.deck.deal()  # Burn card
-            self.community_cards.append(self.deck.deal())
-            self.state = GameState.RIVER
-        
-        elif self.state == GameState.RIVER:
-            self.state = GameState.SHOWDOWN
-            self.determine_winner()
-            return
-        
-        # If all remaining players are all-in, skip betting and continue dealing
-        if all_in_situation:
-            # Recursively call to deal next card immediately
-            self.advance_game_state()
-            return
-        
-        # Set current player to first active player who can act after dealer
-        self.current_player = (self.dealer_position + 1) % len(self.players)
-        
-        # Find the first player who can actually act
-        attempts = 0
-        while attempts < len(self.players):
-            current = self.players[self.current_player]
-            attempts += 1
-            
-            # Player can act if they're not folded, not all-in, and have chips
-            if not current.folded and not current.all_in and current.chips > 0:
-                break
-                
-            # If we've checked all players and none can act, advance game state
-            if self.current_player == (self.dealer_position + 1) % len(self.players):
-                self.advance_game_state()
-                return
-
-    def should_end_game_early(self) -> bool:
-        """Check if the game should end early (only one non-folded player)"""
-        active_players = [p for p in self.players if not p.folded]
-        return len(active_players) <= 1
 
     def determine_winner(self):
         active_players = [p for p in self.players if not p.folded]
@@ -696,15 +607,7 @@ class PokerTable:
             # Store showdown info for display
             self.showdown_hands = player_hands
             
-            # Distribute pot (simplified - doesn't handle side pots properly)
-            best_hand = player_hands[0]
-            winners = [ph for ph in player_hands if ph[1] == best_hand[1] and ph[2] == best_hand[2]]
-            
-            winnings_per_player = self.pot // len(winners)
-            for winner, _, _, _ in winners:
-                winner.chips += winnings_per_player
-            
-            self.pot = 0
+            self._distribute_pots()
         
         self.state = GameState.ENDED
         self.game_active = False

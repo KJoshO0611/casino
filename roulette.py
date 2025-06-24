@@ -104,19 +104,20 @@ class RouletteGame:
             self.players_bets[user_id] = []
         self.players_bets[user_id].append((bet_type, bet_value, amount))
 
-    def resolve_bets(self) -> Dict[int, int]:
+    def resolve_bets(self):
         winning_number, winning_color = self.wheel.spin()
-        winnings: Dict[int, int] = {}
+        payouts: Dict[int, int] = {}
 
         for user_id, bets in self.players_bets.items():
-            total_winnings = 0
+            total_payout = 0
             for bet_type, bet_value, amount in bets:
                 if self.wheel.check_win(bet_type, bet_value, winning_number):
                     payout_ratio = self.wheel.payouts[bet_type]
-                    total_winnings += amount * payout_ratio
-                else:
-                    total_winnings -= amount
-            winnings[user_id] = total_winnings
+                    # Return the original bet plus the winnings
+                    total_payout += (amount * payout_ratio) + amount
         
+            if total_payout > 0:
+                payouts[user_id] = total_payout
+    
         self.players_bets.clear()
-        return winnings, winning_number, winning_color
+        return payouts, winning_number, winning_color

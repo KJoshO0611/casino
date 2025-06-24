@@ -201,7 +201,7 @@ class BlackjackCog(commands.Cog):
             if token_manager.get_chips(player.user_id) < hand.bet:
                 await interaction.followup.send("You can't afford to double!", ephemeral=True)
                 return
-            token_manager.add_chips(player.user_id, -hand.bet)
+            token_manager.remove_chips(player.user_id, hand.bet, destination_id=token_manager.CASINO_POOL_ID)
             hand.bet *= 2
             hand.cards.append(table.deck.deal())
             hand.has_doubled = True
@@ -213,7 +213,7 @@ class BlackjackCog(commands.Cog):
             if not hand.can_split() or token_manager.get_chips(player.user_id) < hand.bet:
                 await interaction.followup.send("You can't afford to split!", ephemeral=True)
                 return
-            token_manager.add_chips(player.user_id, -hand.bet)
+            token_manager.remove_chips(player.user_id, hand.bet, destination_id=token_manager.CASINO_POOL_ID)
             
             new_hand = Hand(bet=hand.bet)
             new_hand.cards.append(hand.cards.pop())
@@ -262,77 +262,57 @@ class BlackjackCog(commands.Cog):
         while table.dealer_hand_value() < 17:
             table.dealer_cards.append(table.deck.deal())
             await self.send_game_state_embed(guild, table, hide_dealer_card=False)
-            await asyncio.sleep(1.5)
-
         # Final state before resolving bets
         await self.send_game_state_embed(guild, table, hide_dealer_card=False)
-        await asyncio.sleep(1)
-        
-        await self.resolve_bets(guild, table)
 
     async def resolve_bets(self, guild: discord.Guild, table: BlackjackTable):
-        dealer_value = table.dealer_hand_value()
-        dealer_bust = dealer_value > 21
+        dealer_hand = table.dealer.current_hand
+        dealer_score = dealer_hand.get_score()
         results = []
-        game_channel = guild.get_channel(table.game_channel_id)
 
-        # Disable buttons on the game embed
-        if game_channel and table.message_id:
-            try:
-                message = await game_channel.fetch_message(table.message_id)
-                view = GameView(self, table)
-                view.disable_all_buttons()
-                await message.edit(view=view)
-            except (discord.NotFound, discord.Forbidden) as e:
-                print(f"Error updating game message {table.message_id}: {e}")
+        pool_balance = token_manager.get_pool_balance()
+        max_payout = int(pool_balance * 0.15) # Cap total payout at 15% of the pool
 
         for player in table.players:
-            player_result = f"**{player.username}'s Results:**\n"
+            player_results = []
             for i, hand in enumerate(player.hands):
-                hand_id = f"Hand {i+1}"
-                if hand.is_bust:
-                    player_result += f"- {hand_id}: Bust! Lost {hand.bet} tokens.\n"
-                elif dealer_bust or hand.hand_value() > dealer_value:
-                    winnings = int(hand.bet * 1.5 if hand.is_natural_blackjack else hand.bet)
-                    # Return original bet + winnings
-                    repayment_message = token_manager.add_chips(player.user_id, hand.bet + winnings)
-                    if repayment_message and game_channel:
-                        await game_channel.send(repayment_message)
-                    player_result += f"- {hand_id}: Win! Gained {winnings} tokens.\n"
-                elif hand.hand_value() == dealer_value:
-                    # Return original bet
-                    repayment_message = token_manager.add_chips(player.user_id, hand.bet)
-                    if repayment_message and game_channel:
-                        await game_channel.send(repayment_message)
-                    player_result += f"- {hand_id}: Push! Bet of {hand.bet} returned.\n"
-                else: # Lost
-                    player_result += f"- {hand_id}: Lose! Lost {hand.bet} tokens.\n"
-            results.append(player_result)
+                hand_id = f" (Hand {i+1})" if len(player.hands) > 1 else ""
+                player_score = hand.get_score()
+                result_str = ""
 
+                # Determine outcome and total payout
+                if hand.is_busted:
+                    result_str = f"{player.display_name}{hand_id}: Busted! Lost {hand.bet} chips."
+                elif dealer_hand.is_busted or player_score > dealer_score:
+                    # Player wins
+                    total_payout = int(hand.bet * 2.5) if hand.is_blackjack else (hand.bet * 2)
+                    if total_payout > max_payout:
+                        result_str = f"{player.display_name}{hand_id}: Bet of {hand.bet} was too large for the table and is forfeited to the house!"
+                    else:
+                        token_manager.add_chips(player.user_id, total_payout, source_id=token_manager.CASINO_POOL_ID)
+                        win_amount = total_payout - hand.bet
+                        result_str = f"{player.display_name}{hand_id}: {'Blackjack!' if hand.is_blackjack else 'Win!'} Won {win_amount} chips."
+                elif player_score < dealer_score:
+                    # Player loses
+                    result_str = f"{player.display_name}{hand_id}: Lost {hand.bet} chips to the dealer."
+                else: # Push
+                    token_manager.add_chips(player.user_id, hand.bet, source_id=token_manager.CASINO_POOL_ID)
+                    result_str = f"{player.display_name}{hand_id}: Push! Bet of {hand.bet} returned."
+                
+                player_results.append(result_str)
+            
+            if player_results:
+                results.append("\n".join(player_results))
+
+        results_embed = discord.Embed(title="Round Over!", description="\n".join(results), color=discord.Color.gold())
+        game_channel = guild.get_channel(table.game_channel_id)
         if game_channel:
-            await game_channel.send("\n".join(results))
-            await game_channel.send("Round finished! Use `!start_betting` for the next round.")
-        
+            await game_channel.send(embed=results_embed)
+            await game_channel.send("Use `!start_betting` to begin the next round.")
+
+        # Reset table for the next round, waiting for bets
         table.state = GameState.WAITING
         await self.update_lobby_embed(table)
-
-    async def start_game_logic(self, guild: discord.Guild, table: BlackjackTable):
-        table.state = GameState.PLAYING
-        await self.update_lobby_embed(table)
-        table.deck.reset()
-
-        for _ in range(2):
-            for player in table.players:
-                player.current_hand.cards.append(table.deck.deal())
-            table.dealer_cards.append(table.deck.deal())
-
-        for player in table.players:
-            if player.current_hand.hand_value() == 21:
-                player.current_hand.is_natural_blackjack = True
-                player.current_hand.is_finished = True
-
-        table.current_player_index = 0
-        await self._advance_game(guild, table)
 
     # --- Commands --- #
     def create_lobby_embed(self, table: BlackjackTable) -> discord.Embed:
@@ -367,7 +347,7 @@ class BlackjackCog(commands.Cog):
         except (discord.NotFound, discord.Forbidden):
             pass # Ignore if message is gone or we can't edit
 
-    @commands.command(name='start_betting')
+    @commands.command(name='start_betting', aliases=['bjstart'])
     @commands.has_permissions(administrator=True)
     async def start_betting(self, ctx):
         table = await self._get_table_from_context(ctx)
@@ -404,7 +384,7 @@ class BlackjackCog(commands.Cog):
 
         player.current_hand.bet = amount
         player.has_bet = True
-        token_manager.add_chips(player.user_id, -amount)
+        token_manager.remove_chips(player.user_id, amount, destination_id=token_manager.CASINO_POOL_ID)
         await ctx.send(f"{ctx.author.display_name} has bet {amount} tokens.")
 
         if all(p.has_bet for p in table.players):
@@ -504,7 +484,7 @@ class BlackjackCog(commands.Cog):
         for player in table.players:
             for hand in player.hands:
                 if hand.bet > 0:
-                    repayment_message = token_manager.add_chips(player.user_id, hand.bet)
+                    repayment_message = token_manager.add_chips(player.user_id, hand.bet, source_id=token_manager.CASINO_POOL_ID)
                     if repayment_message:
                         await ctx.send(repayment_message)
         if table.game_channel_id:
