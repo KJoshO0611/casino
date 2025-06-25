@@ -1,6 +1,9 @@
 import discord
 import uuid
 from discord.ext import commands
+import importlib
+import poker
+importlib.reload(poker)
 from poker import PokerTable, GameState, HandEvaluator
 from token_manager import token_manager
 from typing import Optional, Dict
@@ -265,53 +268,72 @@ class PokerCog(commands.Cog):
 
     @commands.command(name='call')
     async def call_action(self, ctx):
-        table = self._get_table_by_game_channel(ctx.channel.id)
-        if table and table.game_active:
-            message = table.player_action(ctx.author.id, 'call')
-            await ctx.send(message)
-            await self.check_round_end(table)
+        await self._process_player_action(ctx, 'call')
 
     @commands.command(name='raise')
     async def raise_action(self, ctx, amount: int):
-        table = self._get_table_by_game_channel(ctx.channel.id)
-        if table and table.game_active:
-            message = table.player_action(ctx.author.id, 'raise', amount)
-            await ctx.send(message)
-            await self.check_round_end(table)
+        await self._process_player_action(ctx, 'raise', amount=amount)
 
     @commands.command(name='fold')
     async def fold_action(self, ctx):
-        table = self._get_table_by_game_channel(ctx.channel.id)
-        if table and table.game_active:
-            message = table.player_action(ctx.author.id, 'fold')
-            await ctx.send(message)
-            await self.check_round_end(table)
+        await self._process_player_action(ctx, 'fold')
 
     @commands.command(name='check')
     async def check_action(self, ctx):
-        table = self._get_table_by_game_channel(ctx.channel.id)
-        if table and table.game_active:
-            message = table.player_action(ctx.author.id, 'check')
-            await ctx.send(message)
-            await self.check_round_end(table)
+        await self._process_player_action(ctx, 'check')
 
     @commands.command(name='allin')
     async def allin_action(self, ctx):
-        table = self._get_table_by_game_channel(ctx.channel.id)
-        if table and table.game_active:
-            message = table.player_action(ctx.author.id, 'allin')
-            await ctx.send(message)
-            await self.check_round_end(table)
+        await self._process_player_action(ctx, 'allin')
 
-    async def check_round_end(self, table: PokerTable):
+    async def _process_player_action(self, ctx, action_name: str, amount: int = 0):
+        table = self._get_table_by_game_channel(ctx.channel.id)
+        if not table or not table.game_active:
+            await ctx.send("There is no active game in this channel.")
+            return
+
+        if action_name == 'allin':
+            player = table.get_player(ctx.author.id)
+            if not player:
+                await ctx.send("You are not a player at this table.")
+                return
+            amount = player.chips + player.current_bet
+            action_name = 'raise' if table.current_bet > 0 else 'bet'
+
+        if action_name in ['raise', 'bet']:
+            success, message = table.player_action(ctx.author.id, action_name, amount)
+        else:
+            success, message = table.player_action(ctx.author.id, action_name)
+
+        if not success:
+            await ctx.send(f"{ctx.author.mention}, {message}")
+            return
+
+        # On success, check if the round ends, then send one state update.
+        round_ended, showdown = await self.check_round_end(table)
+
+        private_channel = self.bot.get_channel(table.private_channel_id)
+        if private_channel:
+            # Showdown has its own message handler, so we don't send the generic state
+            if not showdown and table.game_active:
+                await self.send_game_state(table, private_channel)
+
+
+    async def check_round_end(self, table: PokerTable) -> tuple[bool, bool]:
+        """
+        Checks if the betting round is over. If so, advances the game state.
+        Returns a tuple of (round_ended, is_showdown).
+        """
         if table.state in [GameState.PREFLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
             if table._is_betting_over():
                 table._advance_state()
-                private_channel = self.bot.get_channel(table.private_channel_id)
-                if private_channel:
-                    await self.send_game_state(table, private_channel)
-                    if table.state == GameState.SHOWDOWN:
+                if table.state == GameState.SHOWDOWN:
+                    private_channel = self.bot.get_channel(table.private_channel_id)
+                    if private_channel:
                         await self.handle_showdown(table, private_channel)
+                    return True, True
+                return True, False
+        return False, False
 
     async def handle_showdown(self, table: PokerTable, channel: discord.TextChannel):
         embed = discord.Embed(title="Showdown Results", color=discord.Color.gold())

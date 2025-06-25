@@ -400,6 +400,48 @@ class PokerTable:
         self.current_bet = self.big_blind
         self.last_raiser = bb_player
 
+    def get_game_state(self) -> Dict:
+        """Returns a dictionary representing the current game state for display."""
+        player_states = []
+        num_players = len(self.players)
+        
+        sb_pos = -1
+        bb_pos = -1
+        if num_players > 0:
+            if num_players == 2: # Heads-up
+                sb_pos = self.dealer_position
+                bb_pos = (self.dealer_position + 1) % num_players
+            else:
+                sb_pos = (self.dealer_position + 1) % num_players
+                bb_pos = (self.dealer_position + 2) % num_players
+
+        for i, player in enumerate(self.players):
+            player_states.append({
+                'user_id': player.user_id,
+                'username': player.username,
+                'chips': player.chips,
+                'current_bet': player.current_bet,
+                'total_bet': player.total_bet,
+                'folded': player.folded,
+                'is_all_in': player.all_in,
+                'is_dealer': i == self.dealer_position,
+                'is_sb': i == sb_pos,
+                'is_bb': i == bb_pos,
+                'is_current_turn': self.game_active and i == self.current_player_index and not player.folded,
+            })
+
+        return {
+            'table_id': self.table_id,
+            'game_active': self.game_active,
+            'state': self.state.value,
+            'pot': self.pot,
+            'house_rake': self.house_rake,
+            'current_bet': self.current_bet,
+            'community_cards': [str(c) for c in self.community_cards],
+            'players': player_states,
+            'game_events': self.game_events[-5:],  # Return last 5 events
+        }
+
     def _get_next_active_player_index(self, start_index: int) -> int:
         next_index = (start_index + 1) % len(self.players)
         while next_index != start_index:
