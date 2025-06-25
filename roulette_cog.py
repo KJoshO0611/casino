@@ -1,4 +1,6 @@
 import discord
+import random
+import asyncio
 from discord.ext import commands
 from typing import Dict, List, Optional
 from discord import Button, ButtonStyle
@@ -190,7 +192,7 @@ class RouletteCog(commands.Cog):
     @commands.command(name='spin')
     @commands.has_permissions(manage_guild=True)
     async def spin_wheel(self, ctx):
-        """Spins the roulette wheel and resolves all bets."""
+        """Spins the roulette wheel with an animation and resolves all bets."""
         channel_id = ctx.channel.id
         if channel_id not in self.games:
             await ctx.send("No roulette game in progress.")
@@ -199,73 +201,92 @@ class RouletteCog(commands.Cog):
         game = self.games[channel_id]
         if not game.players_bets:
             await ctx.send("No bets have been placed. The wheel spins for nothing.")
-            # Clean up the view
             if channel_id in self.active_views:
                 self.active_views[channel_id].stop()
                 del self.active_views[channel_id]
             del self.games[channel_id]
             return
-        
-        # Disable all buttons
+
+        # Disable buttons on the betting interface
         if channel_id in self.active_views:
-            for item in self.active_views[channel_id].children:
+            view = self.active_views[channel_id]
+            for item in view.children:
                 item.disabled = True
             
-            # Edit the original message to disable the buttons
-            try:
-                messages = [msg async for msg in ctx.channel.history(limit=10)]
-                for msg in messages:
-                    if msg.components:
-                        await msg.edit(view=self.active_views[channel_id])
-                        break
-            except Exception as e:
-                print(f"Error disabling buttons: {e}")
+            # The message is attached to the view when sent
+            if hasattr(view, 'message') and view.message:
+                await view.message.edit(view=view)
             
-            # Clean up the view
-            self.active_views[channel_id].stop()
+            view.stop()
             del self.active_views[channel_id]
-        
-        # Spin the wheel and get results
-        payouts, winning_number, winning_color = game.resolve_bets()
 
-        color_emoji = "🔴" if winning_color == 'red' else "⚫"
-        if winning_number == 0:
-            color_emoji = "🟢"
+        await ctx.send("No more bets! The wheel is spinning...")
 
+        # 1. Get the winning number
+        winning_number, winning_color = game.wheel.spin()
+
+        # 2. Create and run the animation
+        animation_embed = discord.Embed(title="🎡 The Wheel is Spinning... 🎡", color=discord.Color.blue())
+        animation_message = await ctx.send(embed=animation_embed)
+
+        # Generate a sequence of numbers for the animation
+        animation_sequence = random.sample([i for i in range(37) if i != winning_number], k=10)
+        # Add a few numbers before the winning one for suspense
+        for i in range(3, 0, -1):
+            num = (winning_number - i + 37) % 37
+            if num not in animation_sequence:
+                animation_sequence.append(num)
+        animation_sequence.append(winning_number)
+
+        for i, number in enumerate(animation_sequence):
+            color = game.wheel.numbers[number]
+            color_emoji = "🔴" if color == 'red' else "⚫" if color == 'black' else "🟢"
+            
+            animation_embed.description = f"The ball passes **{number}** {color_emoji}"
+            await animation_message.edit(embed=animation_embed)
+            
+            # Slow down the animation towards the end
+            sleep_time = 0.5 if i < len(animation_sequence) - 4 else 1.25
+            await asyncio.sleep(sleep_time)
+
+        # 3. Resolve bets with the final number
+        payouts, _, _ = game.resolve_bets(winning_number)
+
+        # 4. Display final results
+        final_color_emoji = "🔴" if winning_color == 'red' else "⚫" if winning_color == 'black' else "🟢"
         result_embed = discord.Embed(
             title="The Wheel has Spun!",
-            description=f"The winning number is **{winning_number}** {color_emoji}",
+            description=f"The winning number is **{winning_number}** {final_color_emoji}",
             color=discord.Color.gold()
         )
 
         winners_str = ""
-        pool_balance = token_manager.get_pool_balance()
-        max_win_per_spin = int(pool_balance * 0.15) # Cap at 15% of the pool
+        if payouts:
+            pool_balance = token_manager.get_pool_balance()
+            max_win_per_spin = int(pool_balance * 0.15)
 
-        for user_id, amount_won in payouts.items():
-            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-            
-            original_win = amount_won
-            capped = False
-            if amount_won > max_win_per_spin:
-                amount_won = max_win_per_spin
-                capped = True
+            for user_id, amount_won in payouts.items():
+                user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                original_win = amount_won
+                capped = False
+                if amount_won > max_win_per_spin:
+                    amount_won = max_win_per_spin
+                    capped = True
 
-            # Pay out winnings from the casino pool. `amount_won` from `resolve_bets` already includes the original bet.
-            repayment_message = token_manager.add_chips(user_id, amount_won, source_id=token_manager.CASINO_POOL_ID)
-            if repayment_message:
-                await ctx.send(repayment_message)
-            
-            win_message = f"{user.mention} won **{amount_won:,}** chips!\n"
-            if capped:
-                win_message += f"*(Your winnings of {original_win:,} were capped to {amount_won:,} to ensure casino stability.)*\n"
-            winners_str += win_message
-
+                repayment_message = token_manager.add_chips(user_id, amount_won, source_id=token_manager.CASINO_POOL_ID)
+                if repayment_message:
+                    await ctx.send(repayment_message, ephemeral=True)
+                
+                win_message = f"{user.mention} won **{amount_won:,}** chips!\n"
+                if capped:
+                    win_message += f"*(Your winnings of {original_win:,} were capped to {amount_won:,} to ensure casino stability.)*\n"
+                winners_str += win_message
+        
         if not winners_str:
             winners_str = "No winners this round. The house wins!"
 
         result_embed.add_field(name="Results", value=winners_str, inline=False)
-        await ctx.send(embed=result_embed)
+        await animation_message.edit(embed=result_embed)
 
         del self.games[channel_id]
 

@@ -104,8 +104,8 @@ class RouletteGame:
             self.players_bets[user_id] = []
         self.players_bets[user_id].append((bet_type, bet_value, amount))
 
-    def resolve_bets(self):
-        winning_number, winning_color = self.wheel.spin()
+    def resolve_bets(self, winning_number: int):
+        winning_color = self.wheel.numbers[winning_number]
         payouts: Dict[int, int] = {}
 
         for user_id, bets in self.players_bets.items():

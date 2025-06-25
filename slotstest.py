@@ -1,8 +1,10 @@
 import random
 from collections import Counter
-from typing import List, Dict, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+import json
 from enum import Enum
+
 
 class WinLevel(Enum):
     """Enumeration for different win levels"""
@@ -58,6 +60,7 @@ class SlotConfig:
                 ('💎', 2): 3.0,
                 ('💎', 3): 12.0,     # ↓ keeps balance but allows big win range
                 ('BAR', 2): 10.0,
+                ('BAR', 3): 25.0,    # ↓ from 30 but more accessible
 
                 # Mixed combinations
                 ('ANY_FRUIT_2', 2): 0.3,
@@ -128,7 +131,6 @@ class SlotMachine:
         """
         self.config = config or SlotConfig()
         self.players: Dict[int, PlayerStats] = {}
-        self.jackpot_pool = 1000.0  # Initial jackpot pool
         self._validate_configuration()
         self._precompute_weights()
         
@@ -180,8 +182,6 @@ class SlotMachine:
         return result
     
     def calculate_winnings(self, player_id: int, result: List[str], bet: int) -> int:
-        # Contribute 2% of the bet to the progressive jackpot
-        self.jackpot_pool += bet * 0.02
         """
         Calculate winnings and update player statistics.
         
@@ -205,13 +205,6 @@ class SlotMachine:
         
         player_stats = self._get_or_create_player(player_id)
         counts = Counter(result)
-
-        # Check for jackpot win (3 BARs)
-        if counts['BAR'] == 3:
-            winnings = int(self.jackpot_pool)
-            self.jackpot_pool = 1000.0  # Reset jackpot to its base value
-            player_stats.add_spin(result, bet, winnings)
-            return winnings
         winnings = 0
         winning_combination = None
         
@@ -310,20 +303,13 @@ class SlotMachine:
         
         return max_winnings, best_combo
     
-    def get_win_description(self, player_id: int, winnings: int, bet: int, result: List[str]) -> str:
+    def get_win_description(self, winnings: int, bet: int) -> str:
         """Get descriptive text for different win levels."""
-        if Counter(result)['BAR'] == 3:
-            return f"🏆🏆🏆 JACKPOT! You won {winnings:,.0f}! 🏆🏆🏆"
-
-        if winnings == 0:
-            pity_level = self.pity_counters.get(player_id, 0)
-            return f"Sorry, not a winning spin. Better luck next time! (Pity level: {pity_level})"
-
         if bet <= 0:
             return "Invalid bet"
-
+        
         multiplier = winnings / bet
-
+        
         if multiplier >= 75:
             return "🎰💰 MEGA JACKPOT! 💰🎰"
         elif multiplier >= 25:
@@ -334,9 +320,11 @@ class SlotMachine:
             return "⭐ SUPER WIN! ⭐"
         elif multiplier >= 4:
             return "🎉 Nice Win! 🎉"
-        else:  # Any other win (multiplier > 1)
+        elif multiplier > 1:
             return "✨ Winner! ✨"
-
+        else:
+            return "Better luck next time!"
+    
     def get_win_level(self, winnings: int, bet: int) -> WinLevel:
         """Get the win level enum for programmatic use."""
         if bet <= 0:
@@ -423,3 +411,100 @@ class SlotMachine:
         if player_id in self.players:
             self.players[player_id] = PlayerStats()
 
+
+# Enhanced multi-player simulation with better reporting
+def simulate_multiple_players_variable_spins(slot_machine, player_spins: List[int], bet_amount=100):
+    """
+    Simulate multiple players on the same slot machine with varying spin counts.
+    
+    Args:
+        slot_machine: Instance of SlotMachine
+        player_spins: List of spin counts per player
+        bet_amount: Fixed bet per spin
+    """
+    print("🎰 VARIABLE SPIN SLOT SIMULATION 🎰")
+    print(f"Theoretical RTP: {slot_machine.calculate_theoretical_rtp():.2f}%")
+    print(f"Simulating {len(player_spins)} players with varying spin counts")
+    print("=" * 60)
+
+    player_results = []
+    all_big_wins = []
+
+    for i, spins in enumerate(player_spins, 1):
+        player_id = i
+        print(f"\n👤 PLAYER {player_id} - {spins} Spins:")
+        print("-" * 40)
+
+        big_wins = []
+        super_wins = []
+        nice_wins = []
+
+        for spin_num in range(spins):
+            result = slot_machine.pull_lever(player_id)
+            winnings = slot_machine.calculate_winnings(player_id, result, bet_amount)
+            multiplier = winnings / bet_amount if bet_amount > 0 else 0
+
+            if multiplier >= 15:
+                big_wins.append({'spin': spin_num + 1, 'result': result, 'winnings': winnings, 'multiplier': multiplier, 'player': player_id})
+                all_big_wins.append(big_wins[-1])
+            elif multiplier >= 8:
+                super_wins.append({'spin': spin_num + 1, 'result': result, 'winnings': winnings, 'multiplier': multiplier})
+            elif multiplier >= 4:
+                nice_wins.append({'spin': spin_num + 1, 'result': result, 'winnings': winnings, 'multiplier': multiplier})
+
+        stats = slot_machine.get_player_stats(player_id)
+        net_result = stats.total_winnings - stats.total_bet
+
+        print(f"\n📊 Final Results:")
+        print(f"  Total Bet: ${stats.total_bet:,}")
+        print(f"  Total Won: ${stats.total_winnings:,}")
+        print(f"  Net Result: ${net_result:,} {'🟢' if net_result > 0 else '🔴'}")
+        print(f"  RTP: {stats.get_rtp():.2f}%")
+        print(f"  Biggest Win: ${stats.biggest_win} ({stats.biggest_win_multiplier:.1f}x)")
+        print(f"  Big Wins: {len(big_wins)} | Super Wins: {len(super_wins)} | Nice Wins: {len(nice_wins)}")
+
+        player_results.append({
+            'player_id': player_id,
+            'spins': spins,
+            'total_bet': stats.total_bet,
+            'total_winnings': stats.total_winnings,
+            'net_result': net_result,
+            'rtp': stats.get_rtp(),
+            'biggest_win': stats.biggest_win,
+            'biggest_multiplier': stats.biggest_win_multiplier,
+            'big_wins': len(big_wins),
+            'super_wins': len(super_wins),
+            'nice_wins': len(nice_wins)
+        })
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("📈 OVERALL SUMMARY")
+    print("=" * 60)
+
+    total_bet_all = sum(p['total_bet'] for p in player_results)
+    total_won_all = sum(p['total_winnings'] for p in player_results)
+    overall_rtp = (total_won_all / total_bet_all) * 100
+    positive_players = sum(1 for p in player_results if p['net_result'] > 0)
+
+    print(f"🎯 Players with Positive Results: {positive_players}/{len(player_spins)}")
+    print(f"💰 Overall RTP: {overall_rtp:.2f}%")
+    print(f"💸 Total Wagered: ${total_bet_all:,}")
+    print(f"🎰 Total Payouts: ${total_won_all:,}")
+    print(f"🏠 House Edge: ${total_bet_all - total_won_all:,}")
+    print(f"🎉 Excitement Factor: Big Wins: {sum(p['big_wins'] for p in player_results)}, Super Wins: {sum(p['super_wins'] for p in player_results)}, Nice Wins: {sum(p['nice_wins'] for p in player_results)}")
+
+    if all_big_wins:
+        print("\n🏆 TOP BIG WINS:")
+        for i, win in enumerate(sorted(all_big_wins, key=lambda x: x['multiplier'], reverse=True)[:5], 1):
+            print(f"{i}. Player {win['player']}, Spin {win['spin']}: {' '.join(win['result'])} → ${win['winnings']} ({win['multiplier']:.1f}x)")
+
+
+
+# Test the balanced slot machine
+if __name__ == "__main__":
+    slot_machine = SlotMachine()
+    
+    # Simulate players with varying spin counts
+    spin_distribution = [10000000]
+    simulate_multiple_players_variable_spins(slot_machine, player_spins=spin_distribution, bet_amount=10)
