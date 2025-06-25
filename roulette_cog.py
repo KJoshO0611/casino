@@ -2,7 +2,10 @@ import discord
 import random
 import asyncio
 from discord.ext import commands
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import discord
 from discord import Button, ButtonStyle
 
 from roulette import RouletteGame, BetType
@@ -17,6 +20,7 @@ class RouletteCog(commands.Cog):
         self.bot = bot
         self.games: Dict[int, RouletteGame] = {}
         self.active_views: Dict[int, discord.ui.View] = {}
+        self.active_messages: Dict[int, discord.Message] = {}
         
     async def create_betting_interface(self, channel_id: int):
         """Creates and returns a view with betting buttons."""
@@ -109,10 +113,9 @@ class RouletteCog(commands.Cog):
         view = await self.create_betting_interface(channel_id)
         self.active_views[channel_id] = view
         
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        self.active_messages[channel_id] = message
         await ctx.send("🎲 **Betting is open!** Use the buttons above to place your bets. 🎲")
-        
-        # Store the view to prevent it from being garbage collected
 
     @commands.command(name='bet_types')
     async def list_bet_types(self, ctx):
@@ -208,17 +211,18 @@ class RouletteCog(commands.Cog):
             return
 
         # Disable buttons on the betting interface
-        if channel_id in self.active_views:
+        if channel_id in self.active_views and channel_id in self.active_messages:
             view = self.active_views[channel_id]
+            message = self.active_messages[channel_id]
             for item in view.children:
-                item.disabled = True
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
             
-            # The message is attached to the view when sent
-            if hasattr(view, 'message') and view.message:
-                await view.message.edit(view=view)
+            await message.edit(view=view)
             
             view.stop()
             del self.active_views[channel_id]
+            del self.active_messages[channel_id]
 
         await ctx.send("No more bets! The wheel is spinning...")
 
