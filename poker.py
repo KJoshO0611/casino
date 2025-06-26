@@ -353,13 +353,21 @@ class PokerTable:
         if len(active_players) == 1:
             winner = active_players[0]
             self.last_pot_won = self.pot
-            winner.chips += self.pot
+            self._calculate_rake()
+            winnings = self.pot - self.house_rake
+            self.last_pot_won = winnings
+            winner.chips += winnings
             self.game_events.append(f"--- Hand Over ---")
-            self.game_events.append(f"{winner.username} wins the pot of {self.last_pot_won}.")
+            self.game_events.append(f"{winner.username} wins the pot of {winnings}.")
             self.pot = 0
             self.end_hand()
             return winner
         return None
+
+    def _calculate_rake(self):
+        rake_percentage = 0.05
+        max_rake = 25
+        self.house_rake = min(int(self.pot * rake_percentage), max_rake)
 
     def _start_betting_round(self):
         self.current_bet = 0
@@ -552,22 +560,55 @@ class PokerTable:
     def process_showdown(self):
         """
         Handles the entire showdown process. Called by the cog.
-        This evaluates hands, determines winners, and distributes all pots.
+        This evaluates hands, determines winners, and distributes the main pot.
+        Note: This simplified version does not handle side pots.
         """
-        self.last_pot_won = self.pot
-        # Final bets are already moved in _advance_state, so we don't do it here.
+        self.showdown_hands = []
+        active_players = [p for p in self.players if not p.folded]
 
-        showdown_players = [p for p in self.players if not p.folded]
-        for player in showdown_players:
-            hand_rank, tiebreakers = HandEvaluator.evaluate_hand(player.cards + self.community_cards)
-            player.hand_rank = hand_rank
-            player.tiebreakers = tiebreakers
+        if not active_players:
+            return
+
+        # Evaluate hands for all active players
+        for player in active_players:
+            all_cards = player.cards + self.community_cards
+            hand_rank, tiebreakers = HandEvaluator.evaluate_hand(all_cards)
             self.showdown_hands.append((player, hand_rank, tiebreakers))
 
-        self._distribute_pots()
+        # Sort players by hand strength to find the winner(s)
+        self.showdown_hands.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+        if not self.showdown_hands:
+            return # Should not happen if active_players is not empty
+
+        # Identify all players with the best hand
+        best_rank, best_tiebreakers = self.showdown_hands[0][1], self.showdown_hands[0][2]
+        winners = [h[0] for h in self.showdown_hands if h[1] == best_rank and h[2] == best_tiebreakers]
+
+        # Calculate rake and distribute winnings
+        self._calculate_rake()
+        winnings = self.pot - self.house_rake
+        self.last_pot_won = winnings
         
-        rake_percentage = 0.05 
-        self.house_rake = int(self.last_pot_won * rake_percentage)
+        if not winners:
+            self.game_events.append("No winners could be determined.")
+            self.pot = 0
+            return
+
+        win_amount_per_winner = winnings // len(winners)
+        
+        winner_names = []
+        for winner_player in winners:
+            winner_player.chips += win_amount_per_winner
+            winner_names.append(winner_player.username)
+
+        # Announce the winner(s) and the pot size
+        self.game_events.append(f"--- Showdown Results ---")
+        if len(winners) > 1:
+            self.game_events.append(f"Split pot: {', '.join(winner_names)} each win {win_amount_per_winner} from a pot of {winnings}.")
+        else:
+            self.game_events.append(f"Winner: {winner_names[0]} wins {winnings} from the pot.")
+
         self.pot = 0
 
     def _distribute_pots(self):
