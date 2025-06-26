@@ -80,11 +80,12 @@ class Hand:
             else:
                 value += 1
         
-        # Check for natural blackjack
-        if len(self.cards) == 2 and value == 21:
-            self.is_blackjack = True
+        self.is_blackjack = value == 21
+        self.is_natural_blackjack = self.is_blackjack and len(self.cards) == 2
+
+        if self.is_blackjack:
             self.is_finished = True
-        
+
         return value
     
     def cards_str(self) -> str:
