@@ -289,80 +289,86 @@ class PokerCog(commands.Cog):
     async def _process_player_action(self, ctx, action_name: str, amount: int = 0):
         table = self._get_table_by_game_channel(ctx.channel.id)
         if not table or not table.game_active:
-            await ctx.send("There is no active game in this channel.")
+            await ctx.send("There is no active game in this channel.", ephemeral=True)
+            return
+
+        player = table.get_player(ctx.author.id)
+        if not player:
+            await ctx.send("You are not a player at this table.", ephemeral=True)
             return
 
         if action_name == 'allin':
-            player = table.get_player(ctx.author.id)
-            if not player:
-                await ctx.send("You are not a player at this table.")
-                return
             amount = player.chips + player.current_bet
             action_name = 'raise' if table.current_bet > 0 else 'bet'
 
-        if action_name in ['raise', 'bet']:
-            success, message = table.player_action(ctx.author.id, action_name, amount)
-        else:
-            success, message = table.player_action(ctx.author.id, action_name)
+        success, message = table.player_action(ctx.author.id, action_name, amount)
 
         if not success:
-            await ctx.send(f"{ctx.author.mention}, {message}")
+            await ctx.send(f"{ctx.author.mention}, {message}", ephemeral=True)
+            return
+        
+        private_channel = self.bot.get_channel(table.private_channel_id)
+        if not private_channel: return
+
+        # 1. Check for winner by folding
+        winner = table.end_hand_by_fold()
+        if winner:
+            await private_channel.send(f"The hand has ended. {winner.username} wins the pot of {table.last_pot_won}.")
+            await self.update_lobby_message(table)
+            token_manager.set_chips(winner.user_id, winner.chips)
             return
 
-        # On success, check if the round ends, then send one state update.
-        round_ended, showdown = await self.check_round_end(table)
-
-        private_channel = self.bot.get_channel(table.private_channel_id)
-        if private_channel:
-            # Showdown has its own message handler, so we don't send the generic state
-            if not showdown and table.game_active:
+        # After an action, check if the betting round is over.
+        if table._is_betting_over():
+            table._advance_state() # This will move to the next street or to showdown.
+            
+            if table.state == GameState.SHOWDOWN:
                 await self.send_game_state(table, private_channel)
-
-
-    async def check_round_end(self, table: PokerTable) -> tuple[bool, bool]:
-        """
-        Checks if the betting round is over. If so, advances the game state.
-        Returns a tuple of (round_ended, is_showdown).
-        """
-        if table.state in [GameState.PREFLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
-            if table._is_betting_over():
-                table._advance_state()
-                if table.state == GameState.SHOWDOWN:
-                    private_channel = self.bot.get_channel(table.private_channel_id)
-                    if private_channel:
-                        await self.handle_showdown(table, private_channel)
-                    return True, True
-                return True, False
-        return False, False
+                await self.handle_showdown(table, private_channel)
+            else:
+                # New round has started (Flop, Turn, River), so send the new state.
+                await self.send_game_state(table, private_channel)
+        else:
+            # The round is not over, just send the updated state.
+            await self.send_game_state(table, private_channel)
 
     async def handle_showdown(self, table: PokerTable, channel: discord.TextChannel):
-        embed = discord.Embed(title="Showdown Results", color=discord.Color.gold())
+        """Orchestrates the showdown, displays results, and ends the hand."""
+        table.process_showdown()
 
-        # Display hands from showdown_hands
-        if table.showdown_hands:
-            showdown_text = []
-            for player, hand_rank, tiebreakers, all_cards in table.showdown_hands:
-                if not player.folded:
-                    hand_name = HandEvaluator.get_hand_name(hand_rank)
-                    best_hand_cards = HandEvaluator.get_best_hand(all_cards)
-                    hand_str = ' '.join(map(str, best_hand_cards))
-                    showdown_text.append(f"{player.username}: {hand_name} (`{hand_str}`)")
-            if showdown_text:
-                embed.add_field(name="Hands", value="\n".join(showdown_text), inline=False)
+        embed = discord.Embed(
+            title=f"Showdown Results - Total Pot: {table.last_pot_won}",
+            color=discord.Color.gold()
+        )
+        
+        showdown_text = []
+        sorted_hands = sorted(table.showdown_hands, key=lambda x: (x[1], x[2]), reverse=True)
 
-        # Display game events for pot distribution
-        if table.game_events:
-            embed.add_field(name="Winnings", value="\n".join(table.game_events), inline=False)
+        for player, hand_rank, _ in sorted_hands:
+            hand_name = HandEvaluator.get_hand_name(hand_rank)
+            best_hand_cards = HandEvaluator.get_best_hand(player.cards + table.community_cards)
+            hand_str = ' '.join(map(str, best_hand_cards))
+            showdown_text.append(f"**{player.username}**: {hand_name} (`{hand_str}`)")
+        
+        if showdown_text:
+            embed.add_field(name="Player Hands", value='\n'.join(showdown_text), inline=False)
+
+        winner_events = [e for e in table.game_events if "wins" in e]
+        if winner_events:
+            embed.add_field(name="Winnings", value='\n'.join(winner_events), inline=False)
+        else:
+            embed.add_field(name="Winnings", value="No winners determined.", inline=False)
 
         await channel.send(embed=embed)
 
-        # Transfer rake to the casino pool
+        for p, _, _ in table.showdown_hands:
+            token_manager.set_chips(p.user_id, p.chips)
+
         if table.house_rake > 0:
             token_manager.add_chips(token_manager.CASINO_POOL_ID, table.house_rake)
             await channel.send(f"The house collected a rake of {table.house_rake} chips.")
 
-        # The game state is now ENDED. A new game can be started.
-        # Update the lobby to reflect the table is available again or concluded.
+        table.end_hand()
         await self.update_lobby_message(table)
 
 async def setup(bot):
